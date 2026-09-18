@@ -25,14 +25,19 @@
 #include <string>
 
 #include "shuzagram/auth/bind_temp_auth_key.hpp"
+#include "shuzagram/auth/sign_in.hpp"
 #include "shuzagram/mtproto/crypto/message_cipher.hpp"
+#include "shuzagram/mtproto/messages/auth.hpp"
 #include "shuzagram/mtproto/messages/bind.hpp"
 #include "shuzagram/mtproto/messages/bool.hpp"
 #include "shuzagram/mtproto/messages/system.hpp"
 #include "shuzagram/mtproto/rpc_dispatch.hpp"
 #include "shuzagram/mtproto/tcp_handshake_server.hpp"
+#include "shuzagram/store/memory/code_store.hpp"
 #include "shuzagram/store/postgres/auth_key_store.hpp"
+#include "shuzagram/store/postgres/authorization_store.hpp"
 #include "shuzagram/store/postgres/temp_auth_key_store.hpp"
+#include "shuzagram/store/postgres/user_store.hpp"
 
 namespace {
 
@@ -120,6 +125,132 @@ std::vector<std::uint8_t> HandleAuthBindTempAuthKey(std::mutex& db_mutex, shuzag
     return out.buf;
 }
 
+// auth.sendCode. Always issues the fixed development code ("12345") --
+// see auth::SendCode's own doc comment for why (no SMS/email provider is
+// wired up in this project).
+std::vector<std::uint8_t> HandleAuthSendCode(std::mutex& db_mutex, shuzagram::store::IUserStore& users,
+                                              shuzagram::store::ICodeStore& codes,
+                                              shuzagram::mtproto::TLBuffer& body) {
+    using namespace shuzagram;
+
+    mtproto::messages::AuthSendCodeRequest req;
+    req.DecodeBare(body);
+
+    try {
+        std::string hash;
+        {
+            std::lock_guard<std::mutex> lock(db_mutex);
+            hash = auth::SendCode(users, codes, req.phone_number);
+        }
+        mtproto::messages::AuthSentCode resp;
+        resp.code_length = 5; // matches the fixed dev code's own length
+        resp.phone_code_hash = hash;
+        mtproto::TLBuffer out;
+        resp.Encode(out);
+        return out.buf;
+    } catch (const auth::PhoneNumberInvalidError&) {
+        return EncodeRpcError(406, "PHONE_NUMBER_INVALID");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "auth.sendCode internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
+// auth.signIn. See auth::SignIn's doc comment: this connection's own
+// auth_key_id (from RpcContext, not resolved from a bound temp key to its
+// permanent identity -- that resolution layer isn't ported yet) is used
+// directly as the Authorization's auth_key_id, so this only behaves
+// correctly for a session on an already-permanent key.
+std::vector<std::uint8_t> HandleAuthSignIn(std::mutex& db_mutex, shuzagram::store::IUserStore& users,
+                                            shuzagram::store::IAuthorizationStore& authorizations,
+                                            shuzagram::store::ICodeStore& codes, shuzagram::mtproto::TLBuffer& body,
+                                            const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    mtproto::messages::AuthSignInRequest req;
+    req.DecodeBare(body);
+
+    domain::Authorization auth_template;
+    auth_template.auth_key_id = ctx.auth_key_id;
+
+    try {
+        auth::SignInResult result;
+        {
+            std::lock_guard<std::mutex> lock(db_mutex);
+            result = auth::SignIn(users, authorizations, codes, auth_template, req.phone_number, req.phone_code_hash,
+                                   req.phone_code);
+        }
+        mtproto::TLBuffer out;
+        if (result.need_sign_up) {
+            mtproto::messages::AuthAuthorizationSignUpRequired resp;
+            resp.Encode(out);
+        } else {
+            mtproto::messages::AuthAuthorization resp;
+            resp.user = result.user;
+            resp.Encode(out);
+        }
+        return out.buf;
+    } catch (const auth::CodeExpiredError&) {
+        return EncodeRpcError(400, "PHONE_CODE_EXPIRED");
+    } catch (const auth::CodeInvalidError&) {
+        return EncodeRpcError(400, "PHONE_CODE_INVALID");
+    } catch (const domain::AccountDeletedError&) {
+        return EncodeRpcError(406, "PHONE_NUMBER_INVALID");
+    } catch (const domain::UserNotFoundError&) {
+        return EncodeRpcError(406, "PHONE_NUMBER_INVALID");
+    } catch (const store::AuthKeyNotPermanentError&) {
+        return EncodeRpcError(401, "AUTH_KEY_PERM_EMPTY");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "auth.signIn internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
+// auth.signUp. Same auth_key_id caveat as auth.signIn above.
+std::vector<std::uint8_t> HandleAuthSignUp(std::mutex& db_mutex, shuzagram::store::IUserStore& users,
+                                            shuzagram::store::IAuthorizationStore& authorizations,
+                                            shuzagram::store::ICodeStore& codes, shuzagram::mtproto::TLBuffer& body,
+                                            const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    mtproto::messages::AuthSignUpRequest req;
+    req.DecodeBare(body);
+
+    domain::Authorization auth_template;
+    auth_template.auth_key_id = ctx.auth_key_id;
+
+    try {
+        domain::User created;
+        {
+            std::lock_guard<std::mutex> lock(db_mutex);
+            created = auth::SignUp(users, authorizations, codes, auth_template, req.phone_number,
+                                    req.phone_code_hash, req.first_name, req.last_name);
+        }
+        mtproto::messages::AuthAuthorization resp;
+        resp.user = created;
+        mtproto::TLBuffer out;
+        resp.Encode(out);
+        return out.buf;
+    } catch (const auth::PhoneNumberInvalidError&) {
+        return EncodeRpcError(406, "PHONE_NUMBER_INVALID");
+    } catch (const domain::FirstNameInvalidError&) {
+        return EncodeRpcError(400, "FIRSTNAME_INVALID");
+    } catch (const auth::CodeExpiredError&) {
+        return EncodeRpcError(400, "PHONE_CODE_EXPIRED");
+    } catch (const auth::CodeInvalidError&) {
+        return EncodeRpcError(400, "PHONE_CODE_INVALID");
+    } catch (const domain::AccountDeletedError&) {
+        return EncodeRpcError(406, "PHONE_NUMBER_INVALID");
+    } catch (const domain::UserNotFoundError&) {
+        return EncodeRpcError(406, "PHONE_NUMBER_INVALID");
+    } catch (const store::AuthKeyNotPermanentError&) {
+        return EncodeRpcError(401, "AUTH_KEY_PERM_EMPTY");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "auth.signUp internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -145,11 +276,16 @@ int main() {
     std::unique_ptr<store::postgres::Database> db;
     std::unique_ptr<store::postgres::AuthKeyStore> auth_key_store;
     std::unique_ptr<store::postgres::TempAuthKeyBindingStore> temp_key_store;
+    std::unique_ptr<store::postgres::UserStore> user_store;
+    std::unique_ptr<store::postgres::AuthorizationStore> authorization_store;
+    store::memory::CodeStore code_store; // see its own doc comment: real, not just a test double
     if (!pg_dsn.empty()) {
         try {
             db = std::make_unique<store::postgres::Database>(pg_dsn);
             auth_key_store = std::make_unique<store::postgres::AuthKeyStore>(*db);
             temp_key_store = std::make_unique<store::postgres::TempAuthKeyBindingStore>(*db);
+            user_store = std::make_unique<store::postgres::UserStore>(*db);
+            authorization_store = std::make_unique<store::postgres::AuthorizationStore>(*db);
             std::printf("connected to Postgres; completed handshakes will persist their auth_key\n");
         } catch (const std::exception& e) {
             std::fprintf(stderr, "failed to connect to Postgres (%s): %s -- continuing without persistence\n",
@@ -167,6 +303,23 @@ int main() {
                                                                      ctx);
                                });
         std::printf("auth.bindTempAuthKey is wired up\n");
+    }
+    if (user_store && authorization_store) {
+        rpc_registry.Register(mtproto::messages::AuthSendCodeRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext&) {
+                                   return HandleAuthSendCode(db_mutex, *user_store, code_store, body);
+                               });
+        rpc_registry.Register(mtproto::messages::AuthSignInRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAuthSignIn(db_mutex, *user_store, *authorization_store, code_store,
+                                                            body, ctx);
+                               });
+        rpc_registry.Register(mtproto::messages::AuthSignUpRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAuthSignUp(db_mutex, *user_store, *authorization_store, code_store,
+                                                            body, ctx);
+                               });
+        std::printf("auth.sendCode/auth.signIn/auth.signUp are wired up (dev fixed code only)\n");
     }
 
     mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key),

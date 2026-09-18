@@ -66,9 +66,11 @@ target_compile_options(shuzagram_mtproto PRIVATE -Wall -Wextra)
 # whichever executable actually wires this up).
 add_library(shuzagram_auth
   src/auth/bind_temp_auth_key.cpp
+  src/auth/sign_in.cpp
+  src/store/memory/code_store.cpp
 )
 target_include_directories(shuzagram_auth PUBLIC include)
-target_link_libraries(shuzagram_auth PUBLIC shuzagram_mtproto)
+target_link_libraries(shuzagram_auth PUBLIC shuzagram_mtproto shuzagram_domain)
 target_compile_options(shuzagram_auth PRIVATE -Wall -Wextra)
 
 enable_testing()

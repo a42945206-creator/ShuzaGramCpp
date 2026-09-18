@@ -86,4 +86,9 @@ public:
     PeerModerationFlagsInvalidError() : Error("peer moderation flags invalid") {}
 };
 
+class FirstNameInvalidError : public Error {
+public:
+    FirstNameInvalidError() : Error("first name invalid") {}
+};
+
 } // namespace shuzagram::domain

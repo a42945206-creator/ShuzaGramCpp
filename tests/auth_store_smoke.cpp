@@ -17,9 +17,11 @@
 #include <string>
 
 #include "shuzagram/auth/bind_temp_auth_key.hpp"
+#include "shuzagram/auth/sign_in.hpp"
 #include "shuzagram/domain/user_errors.hpp"
 #include "shuzagram/mtproto/crypto/bind.hpp"
 #include "shuzagram/store/errors.hpp"
+#include "shuzagram/store/memory/code_store.hpp"
 #include "shuzagram/store/postgres/auth_key_store.hpp"
 #include "shuzagram/store/postgres/authorization_store.hpp"
 #include "shuzagram/store/postgres/temp_auth_key_store.hpp"
@@ -315,6 +317,64 @@ int main() {
             // temp_auth_key_id, so deleting the temp key alone is enough.
             cleanup_temp.exec("DELETE FROM auth_keys WHERE auth_key_id = $1", pqxx::params{raw_temp_id});
             cleanup_temp.commit();
+        }
+
+        // auth.sendCode -> auth.signIn -> auth.signUp -> auth.signIn again,
+        // against the REAL UserStore/AuthorizationStore (this is where the
+        // fake-store ctest coverage in auth_sign_in_test.cpp can't reach:
+        // real phone-uniqueness, real Bind pts-baseline seeding, and a
+        // real second Bind re-authorizing the same auth_key_id). CodeStore
+        // itself is the in-memory implementation either way -- it has no
+        // Postgres dependency to verify here.
+        {
+            store::memory::CodeStore codes;
+
+            const auto signin_key_id = MakeAuthKeyID(access_hash + 4);
+            std::int64_t raw_signin_key_id;
+            std::memcpy(&raw_signin_key_id, signin_key_id.data(), 8);
+            store::AuthKeyData signin_key;
+            signin_key.id = signin_key_id;
+            signin_key.value.fill(0x55);
+            signin_key.expires_at = 0; // permanent
+            auth_keys.Save(signin_key);
+
+            // "888" virtual identities accept 7-15 canonical digits (see
+            // domain/phone.hpp) -- a real-looking E.164 number would need
+            // country-aware parsing this test doesn't want to depend on.
+            const std::string phone = "888" + std::to_string(static_cast<std::uint64_t>(access_hash) % 100000000ULL);
+
+            domain::Authorization auth_template;
+            auth_template.auth_key_id = signin_key_id;
+
+            const auto hash1 = auth::SendCode(users, codes, phone);
+            const auto first_sign_in =
+                auth::SignIn(users, authorizations, codes, auth_template, phone, hash1, "12345");
+            Check(first_sign_in.need_sign_up, "SignIn on a brand-new phone reports need_sign_up");
+            Check(!authorizations.ByAuthKey(signin_key_id).has_value(),
+                  "need_sign_up path does not bind any authorization yet (live store)");
+
+            const auto signed_up = auth::SignUp(users, authorizations, codes, auth_template, phone, hash1,
+                                                 "AuthSmokeSignUp", "");
+            Check(signed_up.phone == phone && signed_up.first_name == "AuthSmokeSignUp",
+                  "SignUp creates a real user row with the normalized phone");
+            const auto bound1 = authorizations.ByAuthKey(signin_key_id);
+            Check(bound1.has_value() && bound1->user_id == signed_up.id,
+                  "SignUp binds the authorization to the new user (live store)");
+
+            const auto hash2 = auth::SendCode(users, codes, phone);
+            const auto second_sign_in =
+                auth::SignIn(users, authorizations, codes, auth_template, phone, hash2, "12345");
+            Check(!second_sign_in.need_sign_up && second_sign_in.user.id == signed_up.id,
+                  "SignIn on the now-registered phone finds the same user and does not need sign-up");
+            const auto bound2 = authorizations.ByAuthKey(signin_key_id);
+            Check(bound2.has_value() && bound2->user_id == signed_up.id,
+                  "the second SignIn re-binds the same authorization row");
+
+            pqxx::work cleanup_signin(db.conn());
+            cleanup_signin.exec("DELETE FROM update_states WHERE auth_key_id = $1", pqxx::params{raw_signin_key_id});
+            cleanup_signin.exec("DELETE FROM auth_keys WHERE auth_key_id = $1", pqxx::params{raw_signin_key_id});
+            cleanup_signin.exec("DELETE FROM users WHERE id = $1", pqxx::params{signed_up.id});
+            cleanup_signin.commit();
         }
 
     } catch (const std::exception& e) {

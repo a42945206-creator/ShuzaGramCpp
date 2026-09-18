@@ -51,3 +51,11 @@ add_test(NAME mtproto_bind_test COMMAND mtproto_bind_test)
 add_executable(auth_bind_temp_auth_key_test auth_bind_temp_auth_key_test.cpp)
 target_link_libraries(auth_bind_temp_auth_key_test PRIVATE shuzagram_auth)
 add_test(NAME auth_bind_temp_auth_key_test COMMAND auth_bind_temp_auth_key_test)
+
+add_executable(mtproto_auth_messages_test mtproto_auth_messages_test.cpp)
+target_link_libraries(mtproto_auth_messages_test PRIVATE shuzagram_mtproto)
+add_test(NAME mtproto_auth_messages_test COMMAND mtproto_auth_messages_test)
+
+add_executable(auth_sign_in_test auth_sign_in_test.cpp)
+target_link_libraries(auth_sign_in_test PRIVATE shuzagram_auth)
+add_test(NAME auth_sign_in_test COMMAND auth_sign_in_test)
