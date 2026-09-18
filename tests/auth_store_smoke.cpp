@@ -5,9 +5,11 @@
 //     user=telesrv password=..." ./build/tests/auth_store_smoke
 //
 // Creates one throwaway user and one throwaway permanent auth_keys row,
-// drives AuthKeyStore and the non-Bind AuthorizationStore surface against
-// them, and deletes both. See user_store_smoke.cpp for the std::_Exit()
-// libpqxx-teardown note.
+// drives the full AuthKeyStore/AuthorizationStore surface against them
+// (including Bind's reject paths and its user_update_watermarks/
+// user_update_retention/update_states baseline), and deletes everything it
+// created. See user_store_smoke.cpp for the std::_Exit() libpqxx-teardown
+// note.
 
 #include <cstdio>
 #include <cstdlib>
@@ -92,32 +94,108 @@ int main() {
         Check(after_info.has_value() && after_info->layer == 177 && after_info->device_model == "SmokeDeviceV2",
               "AuthKeyStore::UpdateClientInfo merges layer and device_model");
 
-        domain::Authorization not_found_check;
         const auto missing = authorizations.ByAuthKey(key_id);
-        Check(!missing.has_value(), "ByAuthKey(unbound key) finds nothing yet (Bind is not implemented)");
+        Check(!missing.has_value(), "ByAuthKey(unbound key) finds nothing before Bind");
 
-        try {
-            authorizations.Bind(not_found_check);
-            Check(false, "Bind should throw NotImplementedError");
-        } catch (const domain::NotImplementedError&) {
-            Check(true, "Bind throws NotImplementedError (update-baseline subsystem not ported)");
-        }
-
-        // Exercise the authorization row surface directly via raw SQL,
-        // since Bind itself is deferred -- this still verifies ByAuthKey/
-        // UpdateClientInfo/ListByUser/MarkPasswordPassed/Delete against a
-        // real row shaped exactly like Bind would produce one.
+        // Reject path: a temporary key can never be bound.
         {
-            pqxx::work tx(db.conn());
-            tx.exec("INSERT INTO authorizations (auth_key_id, user_id, hash, password_pending) "
-                    "VALUES ($1, $2, $3, true)",
-                    pqxx::params{raw_key_id, user_id, static_cast<std::int64_t>(1)});
-            tx.commit();
+            const auto temp_key_id = MakeAuthKeyID(access_hash + 1);
+            std::int64_t raw_temp_id;
+            std::memcpy(&raw_temp_id, temp_key_id.data(), 8);
+            store::AuthKeyData temp_key;
+            temp_key.id = temp_key_id;
+            temp_key.value.fill(0x43);
+            temp_key.expires_at = 3600; // temporary
+            auth_keys.Save(temp_key);
+            domain::Authorization temp_bind;
+            temp_bind.auth_key_id = temp_key_id;
+            temp_bind.user_id = user_id;
+            temp_bind.password_pending = true;
+            try {
+                authorizations.Bind(temp_bind);
+                Check(false, "Bind(temporary key) should throw AuthKeyNotPermanentError");
+            } catch (const store::AuthKeyNotPermanentError&) {
+                Check(true, "Bind(temporary key) throws AuthKeyNotPermanentError");
+            }
+            pqxx::work cleanup_temp(db.conn());
+            cleanup_temp.exec("DELETE FROM auth_keys WHERE auth_key_id = $1", pqxx::params{raw_temp_id});
+            cleanup_temp.commit();
         }
+
+        // Reject path: a soft-deleted user can never be bound to.
+        {
+            domain::User deletable_draft;
+            deletable_draft.access_hash = access_hash + 2;
+            deletable_draft.first_name = "AuthSmokeDeletedTest";
+            const domain::User deletable = users.Create(deletable_draft);
+            {
+                pqxx::work mark_deleted(db.conn());
+                mark_deleted.exec("UPDATE users SET deleted_at = now(), deletion_source = 'manual', "
+                                   "first_name = '', last_name = '', username = '', country_code = '', "
+                                   "about = '', phone = ''"
+                                   " WHERE id = $1",
+                                   pqxx::params{deletable.id});
+                mark_deleted.commit();
+            }
+            domain::Authorization deleted_bind;
+            deleted_bind.auth_key_id = key_id;
+            deleted_bind.user_id = deletable.id;
+            deleted_bind.password_pending = true;
+            try {
+                authorizations.Bind(deleted_bind);
+                Check(false, "Bind(deleted user) should throw AccountDeletedError");
+            } catch (const domain::AccountDeletedError&) {
+                Check(true, "Bind(deleted user) throws AccountDeletedError");
+            }
+            pqxx::work cleanup_deleted(db.conn());
+            cleanup_deleted.exec("DELETE FROM users WHERE id = $1", pqxx::params{deletable.id});
+            cleanup_deleted.commit();
+        }
+
+        // Happy path.
+        domain::Authorization bind_request;
+        bind_request.auth_key_id = key_id;
+        bind_request.user_id = user_id;
+        bind_request.device_model = "SmokeDevice";
+        bind_request.platform = "linux";
+        bind_request.password_pending = true;
+        authorizations.Bind(bind_request);
 
         const auto bound = authorizations.ByAuthKey(key_id);
-        Check(bound.has_value() && bound->user_id == user_id && bound->password_pending,
-              "ByAuthKey finds the row seeded via raw SQL");
+        Check(bound.has_value() && bound->user_id == user_id && bound->password_pending && bound->hash != 0,
+              "Bind writes an authorization row with a non-zero computed hash");
+
+        {
+            pqxx::work check_tx(db.conn());
+            const auto watermark =
+                check_tx.exec("SELECT contiguous_pts FROM user_update_watermarks WHERE user_id = $1",
+                               pqxx::params{user_id});
+            const auto retention =
+                check_tx.exec("SELECT retained_through_pts FROM user_update_retention WHERE user_id = $1",
+                               pqxx::params{user_id});
+            const auto state = check_tx.exec(
+                "SELECT pts, qts, observed_pts FROM update_states WHERE auth_key_id = $1 AND user_id = $2",
+                pqxx::params{raw_key_id, user_id});
+            check_tx.commit();
+            Check(!watermark.empty() && watermark[0][0].as<int>() == 0,
+                  "Bind seeds user_update_watermarks at contiguous_pts=0 for a fresh user");
+            Check(!retention.empty() && retention[0][0].as<int>() == 0,
+                  "Bind seeds user_update_retention at retained_through_pts=0 for a fresh user");
+            Check(!state.empty() && state[0][0].as<int>() == 0 && state[0][1].as<int>() == 0 &&
+                      state[0][2].as<int>() == 0,
+                  "Bind seeds this device's update_states baseline at pts=qts=observed_pts=0");
+        }
+
+        // Re-bind (e.g. a metadata refresh on the same auth key) hits ON
+        // CONFLICT DO UPDATE and still succeeds without violating the pts
+        // invariants just checked. Deliberately keeps password_pending
+        // true: MarkPasswordPassed below still needs to find it pending.
+        domain::Authorization rebind_request = bind_request;
+        rebind_request.device_model = "SmokeDeviceRebound";
+        authorizations.Bind(rebind_request);
+        const auto rebound = authorizations.ByAuthKey(key_id);
+        Check(rebound.has_value() && rebound->device_model == "SmokeDeviceRebound" && rebound->password_pending,
+              "Re-Bind updates the existing row in place");
 
         domain::AuthKeyClientInfo client_info;
         client_info.layer = 200;
@@ -160,6 +238,12 @@ int main() {
     }
 
     pqxx::work cleanup(db.conn());
+    // update_states has no FK to auth_keys/users (AuthKeyStore::Delete and
+    // Bind both clean it explicitly instead), so it needs its own delete
+    // here; user_update_watermarks/user_update_retention cascade off the
+    // user delete below, and authorizations cascades off the auth_keys
+    // delete.
+    cleanup.exec("DELETE FROM update_states WHERE auth_key_id = $1", pqxx::params{raw_key_id});
     cleanup.exec("DELETE FROM auth_keys WHERE auth_key_id = $1", pqxx::params{raw_key_id});
     cleanup.exec("DELETE FROM users WHERE id = $1", pqxx::params{user_id});
     cleanup.commit();

@@ -3,3 +3,6 @@ build-*/
 compile_commands.json
 *.o
 *.a
+
+# Local working notes -- never committed.
+/NOTES/

@@ -15,12 +15,12 @@ public:
     virtual ~IAuthorizationStore() = default;
 
     // Commits the auth_key -> user binding and the device's update-delivery
-    // baseline as one state boundary. Throws domain::NotImplementedError in
-    // this slice: the Go source (bindAuthorization) interleaves this with
-    // user_update_watermarks/user_update_retention/update_states, the
-    // durable delivery-baseline subsystem, which isn't ported yet. Faking a
-    // shortcut here would silently corrupt future updates.getDifference
-    // baselines, so it refuses instead.
+    // baseline (user_update_watermarks/user_update_retention/update_states)
+    // as one state boundary. An unset a.hash is computed automatically
+    // (SHA-256 of the auth_key_id). Throws domain::UserNotFoundError,
+    // domain::AccountDeletedError, store::AuthKeyNotFoundError or
+    // store::AuthKeyNotPermanentError; a store::Error signals an internal
+    // pts-invariant violation (should be unreachable in practice).
     virtual void Bind(const domain::Authorization& a) = 0;
 
     virtual std::optional<domain::Authorization> ByAuthKey(const std::array<std::uint8_t, 8>& auth_key_id) = 0;

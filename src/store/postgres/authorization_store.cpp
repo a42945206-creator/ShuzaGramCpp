@@ -1,11 +1,15 @@
 #include "shuzagram/store/postgres/authorization_store.hpp"
 
+#include <cstring>
 #include <sstream>
+
+#include <openssl/evp.h>
 
 #include "auth_identity_lock.hpp"
 #include "auth_key_codec.hpp"
 #include "shuzagram/domain/user_errors.hpp"
 #include "shuzagram/store/errors.hpp"
+#include "user_lock.hpp"
 
 // Ported from internal/store/postgres/authorization.go.
 namespace shuzagram::store::postgres {
@@ -43,17 +47,119 @@ domain::Authorization RowToAuthorization(const pqxx::row& r) {
     return a;
 }
 
+// Port of authorizationHash (authorization.go:589): SHA-256 of the raw
+// auth_key_id bytes, low 64 bits reinterpreted little-endian, with the
+// (astronomically unlikely) zero result mapped to 1 so hash always
+// distinguishes "unset" from a real value in the (user_id, hash) unique
+// index.
+std::int64_t AuthorizationHash(const std::array<std::uint8_t, 8>& auth_key_id) {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int digest_len = 0;
+    EVP_Digest(auth_key_id.data(), auth_key_id.size(), digest.data(), &digest_len, EVP_sha256(), nullptr);
+    std::uint64_t low8;
+    std::memcpy(&low8, digest.data(), 8);
+    const auto hash = static_cast<std::int64_t>(low8);
+    return hash == 0 ? 1 : hash;
+}
+
 } // namespace
 
-void AuthorizationStore::Bind(const domain::Authorization&) {
-    // bindAuthorization (authorization.go) interleaves the auth_key<->user
-    // write with user_update_watermarks/user_update_retention/update_states
-    // to commit a durable updates.getDifference delivery baseline in the
-    // same transaction. That subsystem isn't ported yet; writing the
-    // authorization row without it would produce a row with no valid pts
-    // baseline, which every subsequent update-delivery read assumes exists.
-    throw domain::NotImplementedError(
-        "AuthorizationStore::Bind (needs the update_states/watermark/retention delivery-baseline subsystem)");
+// Port of bindAuthorization (authorization.go:51). Commits the auth_key <->
+// user write and the device's update-delivery baseline as one state
+// boundary. Lock order is fixed: target user advisory lock -> auth_keys
+// parent row -> user_update_watermarks -> user_update_retention -> target
+// update_states, matching the pruner's own lock order so a new
+// authorization's observed baseline and the retained floor never commit
+// across each other into a silent gap. The parent-row lock also serializes
+// concurrent logins/re-logins of the same raw auth key even before its
+// first authorization exists.
+void AuthorizationStore::Bind(const domain::Authorization& a_in) {
+    domain::Authorization a = a_in;
+    if (a.hash == 0) a.hash = AuthorizationHash(a.auth_key_id);
+    const std::int64_t key_id = AuthKeyIDToInt64(a.auth_key_id);
+
+    detail::WithAuthIdentityTx(db_.conn(), "bind authorization", [&](pqxx::transaction_base& tx) {
+        detail::LockUserForUpdate(tx, a.user_id);
+        const auto user_row =
+            tx.exec("SELECT deleted_at IS NULL FROM users WHERE id = $1 FOR UPDATE", pqxx::params{a.user_id});
+        if (user_row.empty()) throw domain::UserNotFoundError();
+        if (!user_row[0][0].as<bool>()) throw domain::AccountDeletedError();
+
+        detail::LockPermanentAuthIdentities(tx, {key_id});
+        const auto key_row = tx.exec("SELECT expires_at, layer, layer_observation_id FROM auth_keys "
+                                      "WHERE auth_key_id = $1 FOR UPDATE",
+                                      pqxx::params{key_id});
+        if (key_row.empty()) throw AuthKeyNotFoundError();
+        const int expires_at = key_row[0][0].as<int>();
+        const int auth_layer = key_row[0][1].as<int>();
+        const std::int64_t layer_observation_id = key_row[0][2].as<std::int64_t>();
+        if (expires_at != 0) throw AuthKeyNotPermanentError();
+        if (auth_layer < 0 || layer_observation_id < 0 || (layer_observation_id > 0 && auth_layer == 0)) {
+            throw store::Error("authorization auth-key layer invariant violation: auth key has layer " +
+                                std::to_string(auth_layer) + " observation " + std::to_string(layer_observation_id));
+        }
+
+        tx.exec("INSERT INTO user_update_watermarks (user_id, contiguous_pts) VALUES ($1, 0) "
+                "ON CONFLICT (user_id) DO NOTHING",
+                pqxx::params{a.user_id});
+        const auto watermark_row = tx.exec(
+            "SELECT contiguous_pts FROM user_update_watermarks WHERE user_id = $1 FOR UPDATE", pqxx::params{a.user_id});
+        const int current_pts = watermark_row[0][0].as<int>();
+
+        tx.exec("INSERT INTO user_update_retention (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                pqxx::params{a.user_id});
+        const auto retention_row = tx.exec(
+            "SELECT retained_through_pts FROM user_update_retention WHERE user_id = $1 FOR UPDATE",
+            pqxx::params{a.user_id});
+        const int retained_floor = retention_row[0][0].as<int>();
+        if (retained_floor > current_pts) {
+            throw store::Error(
+                "authorization update baseline invariant violation: user " + std::to_string(a.user_id) +
+                " retained floor " + std::to_string(retained_floor) + " exceeds contiguous watermark " +
+                std::to_string(current_pts));
+        }
+
+        // Every Bind is an explicit login baseline: delivered pts advances to
+        // the account's already-locked contiguous watermark; observed only
+        // advances to the already-deleted retained floor, never disguising a
+        // live tail as client-confirmed. A stale historical state beyond the
+        // account's contiguous watermark must fail fast, never GREATEST'd
+        // into keeping an illegal future cursor. The WHERE also closes the
+        // "concurrent insert after precheck" race.
+        const auto upsert = tx.exec(
+            "INSERT INTO update_states (auth_key_id, user_id, pts, qts, date, seq, observed_pts) "
+            "VALUES ($1, $2, $3, 0, EXTRACT(EPOCH FROM now())::int, 0, $4) "
+            "ON CONFLICT (auth_key_id, user_id) DO UPDATE SET "
+            "pts = GREATEST(update_states.pts, EXCLUDED.pts), "
+            "qts = GREATEST(update_states.qts, EXCLUDED.qts), "
+            "date = GREATEST(update_states.date, EXCLUDED.date), "
+            "seq = GREATEST(update_states.seq, EXCLUDED.seq), "
+            "observed_pts = GREATEST(update_states.observed_pts, EXCLUDED.observed_pts), "
+            "updated_at = now() "
+            "WHERE update_states.pts >= 0 AND update_states.pts <= $3 AND update_states.observed_pts <= $3",
+            pqxx::params{key_id, a.user_id, current_pts, retained_floor});
+        if (upsert.affected_rows() != 1) {
+            throw store::Error(
+                "authorization update baseline invariant violation: auth key user " + std::to_string(a.user_id) +
+                " has pts or observed_pts outside contiguous watermark " + std::to_string(current_pts));
+        }
+
+        tx.exec("DELETE FROM update_states WHERE auth_key_id = $1 AND user_id <> $2",
+                pqxx::params{key_id, a.user_id});
+
+        tx.exec(
+            "INSERT INTO authorizations (auth_key_id, user_id, hash, layer, device_model, platform, "
+            "system_version, api_id, app_version, ip, password_pending) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) "
+            "ON CONFLICT (auth_key_id) DO UPDATE SET "
+            "user_id = EXCLUDED.user_id, hash = EXCLUDED.hash, layer = EXCLUDED.layer, "
+            "device_model = EXCLUDED.device_model, platform = EXCLUDED.platform, "
+            "system_version = EXCLUDED.system_version, api_id = EXCLUDED.api_id, "
+            "app_version = EXCLUDED.app_version, ip = EXCLUDED.ip, "
+            "password_pending = EXCLUDED.password_pending, created_at = now(), active_at = now()",
+            pqxx::params{key_id, a.user_id, a.hash, auth_layer, a.device_model, a.platform, a.system_version,
+                         a.api_id, a.app_version, a.ip, a.password_pending});
+    });
 }
 
 std::optional<domain::Authorization> AuthorizationStore::ByAuthKey(const std::array<std::uint8_t, 8>& auth_key_id) {

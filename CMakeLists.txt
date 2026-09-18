@@ -12,6 +12,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBPQXX REQUIRED IMPORTED_TARGET libpqxx)
 find_package(nlohmann_json REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 # libphonenumber (Debian's libphonenumber-dev) ships no pkg-config file, so
 # it's located and linked by name instead.
@@ -28,12 +29,13 @@ target_compile_options(shuzagram_domain PRIVATE -Wall -Wextra)
 add_library(shuzagram_store_postgres
   src/store/postgres/user_store.cpp
   src/store/postgres/auth_identity_lock.cpp
+  src/store/postgres/user_lock.cpp
   src/store/postgres/auth_key_store.cpp
   src/store/postgres/authorization_store.cpp
 )
 target_include_directories(shuzagram_store_postgres PUBLIC include)
 target_link_libraries(shuzagram_store_postgres PUBLIC shuzagram_domain PkgConfig::LIBPQXX
-                                                        nlohmann_json::nlohmann_json)
+                                                        nlohmann_json::nlohmann_json OpenSSL::Crypto)
 target_compile_options(shuzagram_store_postgres PRIVATE -Wall -Wextra)
 
 enable_testing()
