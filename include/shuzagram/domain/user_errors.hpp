@@ -61,6 +61,11 @@ public:
     UserFrozenError() : Error("user account frozen") {}
 };
 
+class AccountDeletedError : public Error {
+public:
+    AccountDeletedError() : Error("account deleted") {}
+};
+
 class BirthdayInvalidError : public Error {
 public:
     BirthdayInvalidError() : Error("birthday invalid") {}

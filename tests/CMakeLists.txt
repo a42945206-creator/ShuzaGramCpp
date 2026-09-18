@@ -4,3 +4,6 @@ add_test(NAME domain_test COMMAND domain_test)
 
 add_executable(user_store_smoke user_store_smoke.cpp)
 target_link_libraries(user_store_smoke PRIVATE shuzagram_store_postgres)
+
+add_executable(auth_store_smoke auth_store_smoke.cpp)
+target_link_libraries(auth_store_smoke PRIVATE shuzagram_store_postgres)
