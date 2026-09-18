@@ -24,6 +24,14 @@ public:
     void UpdateLastSeen(std::int64_t user_id, int last_seen_at) override;
     domain::User UpdateProfile(std::int64_t user_id, const std::string& first_name,
                                const std::string& last_name, const std::string& about) override;
+    domain::User UpdateUsername(std::int64_t user_id, const std::string& username) override;
+    domain::User UpdatePhone(std::int64_t user_id, const std::string& phone) override;
+    domain::User SetScamFake(std::int64_t user_id, bool scam, bool fake) override;
+    std::vector<domain::User> SweepExpiredPremium(std::int64_t now, int limit) override;
+    domain::User UpdateEmojiStatus(std::int64_t user_id, const domain::UserEmojiStatus& status) override;
+    domain::User UpdateBirthday(std::int64_t user_id, const domain::Birthday& birthday) override;
+    domain::User UpdatePersonalChannel(std::int64_t user_id, std::int64_t channel_id) override;
+    domain::User UpdateColor(std::int64_t user_id, bool for_profile, const domain::PeerColor& color) override;
 
 private:
     Database& db_;

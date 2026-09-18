@@ -219,6 +219,31 @@ std::string ToLower(std::string s) {
     return s;
 }
 
+// Mirrors encodeEmojiStatusCollectible in user.go: validates the snapshot
+// shape and, for a non-empty collectible, serializes it to the jsonb column
+// value plus its id. Returns ("{}", nullopt) for the "clear" / plain-document
+// case.
+struct EncodedEmojiStatus {
+    std::string json;
+    std::optional<std::int64_t> collectible_id;
+};
+
+EncodedEmojiStatus EncodeEmojiStatusCollectible(const domain::UserEmojiStatus& status) {
+    if (!status.Valid()) throw domain::StarGiftCollectibleInvalidError();
+    if (status.collectible.Empty()) return {"{}", std::nullopt};
+    nlohmann::json j;
+    j["collectible_id"] = status.collectible.collectible_id;
+    j["document_id"] = status.collectible.document_id;
+    j["title"] = status.collectible.title;
+    j["slug"] = status.collectible.slug;
+    j["pattern_document_id"] = status.collectible.pattern_document_id;
+    j["center_color"] = status.collectible.center_color;
+    j["edge_color"] = status.collectible.edge_color;
+    j["pattern_color"] = status.collectible.pattern_color;
+    j["text_color"] = status.collectible.text_color;
+    return {j.dump(), status.collectible.collectible_id};
+}
+
 } // namespace
 
 std::optional<domain::User> UserStore::ByID(std::int64_t id) {
@@ -350,6 +375,158 @@ domain::User UserStore::UpdateProfile(std::int64_t user_id, const std::string& f
         WrapProjection("UPDATE users SET first_name = $2, last_name = $3, about = $4, updated_at = now() "
                         "WHERE id = $1 AND deleted_at IS NULL RETURNING *"),
         pqxx::params{user_id, first_name, last_name, about});
+    tx.commit();
+    if (result.empty()) throw domain::UserNotFoundError();
+    return RowToUser(result[0]);
+}
+
+domain::User UserStore::UpdateUsername(std::int64_t user_id, const std::string& username_in) {
+    const std::string username = TrimUsername(username_in);
+    const std::string username_lower = ToLower(username);
+
+    pqxx::work tx(db_.conn());
+    {
+        const auto locked =
+            tx.exec("SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+                    pqxx::params{user_id});
+        if (locked.empty()) throw domain::UsernameNotOccupiedError();
+    }
+    ReplacePeerUsernameTx(tx, "user", user_id, username, username_lower);
+
+    pqxx::result result;
+    try {
+        result = tx.exec(
+            WrapProjection("UPDATE users SET username = $2, updated_at = now() "
+                            "WHERE id = $1 AND deleted_at IS NULL RETURNING *"),
+            pqxx::params{user_id, username});
+    } catch (const pqxx::sql_error& e) {
+        if (IsUniqueViolation(e, "users_username_lower_unique_idx")) throw domain::UsernameOccupiedError();
+        throw;
+    }
+    if (result.empty()) throw domain::UsernameNotOccupiedError();
+    tx.commit();
+    return RowToUser(result[0]);
+}
+
+domain::User UserStore::UpdatePhone(std::int64_t user_id, const std::string& phone) {
+    pqxx::work tx(db_.conn());
+    pqxx::result result;
+    try {
+        result = tx.exec(
+            WrapProjection("UPDATE users SET phone = $2, updated_at = now() "
+                            "WHERE id = $1 AND deleted_at IS NULL RETURNING *"),
+            pqxx::params{user_id, phone});
+    } catch (const pqxx::sql_error& e) {
+        if (IsUniqueViolation(e, "users_phone_unique_idx")) throw domain::PhoneNumberOccupiedError();
+        throw;
+    }
+    tx.commit();
+    if (result.empty()) throw domain::UserNotFoundError();
+    return RowToUser(result[0]);
+}
+
+domain::User UserStore::SetScamFake(std::int64_t user_id, bool scam, bool fake) {
+    if (scam && fake) throw domain::PeerModerationFlagsInvalidError();
+
+    pqxx::work tx(db_.conn());
+    const auto current = tx.exec("SELECT scam, fake FROM users WHERE id = $1 FOR UPDATE", pqxx::params{user_id});
+    if (current.empty()) throw domain::UserNotFoundError();
+
+    if (current[0][0].as<bool>() == scam && current[0][1].as<bool>() == fake) {
+        const auto result = tx.exec(WrapProjection("SELECT * FROM users WHERE id = $1"), pqxx::params{user_id});
+        tx.commit();
+        return RowToUser(result[0]);
+    }
+
+    const auto result = tx.exec(
+        WrapProjection("UPDATE users SET scam = $2, fake = $3, updated_at = now() "
+                        "WHERE id = $1 RETURNING *"),
+        pqxx::params{user_id, scam, fake});
+    if (result.empty()) throw domain::UserNotFoundError();
+    tx.commit();
+    return RowToUser(result[0]);
+}
+
+std::vector<domain::User> UserStore::SweepExpiredPremium(std::int64_t now, int limit) {
+    if (limit <= 0) return {};
+    pqxx::work tx(db_.conn());
+    const auto result = tx.exec(
+        WrapProjection(R"SQL(
+UPDATE users
+SET premium_expires_at = NULL, updated_at = now()
+WHERE id IN (
+  SELECT id FROM users
+  WHERE premium_expires_at IS NOT NULL AND deleted_at IS NULL AND premium_expires_at <= to_timestamp($1)
+  ORDER BY premium_expires_at
+  LIMIT $2
+)
+RETURNING *
+)SQL"),
+        pqxx::params{now, limit});
+    tx.commit();
+    std::vector<domain::User> out;
+    out.reserve(result.size());
+    for (const auto& row : result) out.push_back(RowToUser(row));
+    return out;
+}
+
+domain::User UserStore::UpdateEmojiStatus(std::int64_t user_id, const domain::UserEmojiStatus& status) {
+    const EncodedEmojiStatus encoded = EncodeEmojiStatusCollectible(status);
+    if (!status.collectible.Empty()) {
+        // The Go source locks unique_star_gifts, re-derives the expected
+        // snapshot from the owned gift, and rejects a mismatched/foreign/
+        // burned one (updateEmojiStatusRow in user.go) before writing. That
+        // whole check depends on the star-gift/unique_star_gifts module,
+        // which isn't ported yet -- so this path refuses rather than writing
+        // an unverified collectible snapshot.
+        throw domain::NotImplementedError(
+            "UpdateEmojiStatus with a collectible snapshot (needs the star-gift module)");
+    }
+
+    pqxx::work tx(db_.conn());
+    const auto result = tx.exec(
+        WrapProjection(
+            "UPDATE users SET emoji_status_document_id = $2, emoji_status_until = $3, "
+            "emoji_status_collectible_id = $4, emoji_status_collectible = $5::jsonb, updated_at = now() "
+            "WHERE id = $1 AND deleted_at IS NULL RETURNING *"),
+        pqxx::params{user_id, status.document_id, static_cast<std::int64_t>(status.until),
+                     encoded.collectible_id, encoded.json});
+    tx.commit();
+    if (result.empty()) throw domain::UserNotFoundError();
+    return RowToUser(result[0]);
+}
+
+domain::User UserStore::UpdateBirthday(std::int64_t user_id, const domain::Birthday& birthday) {
+    pqxx::work tx(db_.conn());
+    const auto result = tx.exec(
+        WrapProjection("UPDATE users SET birthday_day = $2, birthday_month = $3, birthday_year = $4, "
+                        "updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING *"),
+        pqxx::params{user_id, birthday.day, birthday.month, birthday.year});
+    tx.commit();
+    if (result.empty()) throw domain::UserNotFoundError();
+    return RowToUser(result[0]);
+}
+
+domain::User UserStore::UpdatePersonalChannel(std::int64_t user_id, std::int64_t channel_id) {
+    pqxx::work tx(db_.conn());
+    const auto result = tx.exec(
+        WrapProjection("UPDATE users SET personal_channel_id = $2, updated_at = now() "
+                        "WHERE id = $1 AND deleted_at IS NULL RETURNING *"),
+        pqxx::params{user_id, channel_id});
+    tx.commit();
+    if (result.empty()) throw domain::UserNotFoundError();
+    return RowToUser(result[0]);
+}
+
+domain::User UserStore::UpdateColor(std::int64_t user_id, bool for_profile, const domain::PeerColor& color) {
+    pqxx::work tx(db_.conn());
+    const std::string column_prefix = for_profile ? "profile_color" : "color";
+    const std::string sql = "UPDATE users SET " + column_prefix + "_set = $2, " + column_prefix +
+                             " = $3, " + column_prefix +
+                             "_background_emoji_id = $4, updated_at = now() "
+                             "WHERE id = $1 AND deleted_at IS NULL RETURNING *";
+    const auto result = tx.exec(WrapProjection(sql),
+                                 pqxx::params{user_id, color.has_color, color.color, color.background_emoji_id});
     tx.commit();
     if (result.empty()) throw domain::UserNotFoundError();
     return RowToUser(result[0]);

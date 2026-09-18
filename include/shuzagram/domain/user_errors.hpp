@@ -31,6 +31,31 @@ public:
     UserNotFoundError() : Error("user not found") {}
 };
 
+class UsernameNotOccupiedError : public Error {
+public:
+    UsernameNotOccupiedError() : Error("username not occupied") {}
+};
+
+class PhoneNumberOccupiedError : public Error {
+public:
+    PhoneNumberOccupiedError() : Error("phone number occupied") {}
+};
+
+class StarGiftCollectibleInvalidError : public Error {
+public:
+    StarGiftCollectibleInvalidError() : Error("stargift: invalid collectible definition") {}
+};
+
+// Marks a code path that is a faithful gap, not a business-rule error: the
+// Go source handles it, but the C++ port hasn't reached the dependency yet
+// (e.g. the star-gift/unique_star_gifts module). Distinct from domain::Error
+// so callers can tell "the operation is invalid" apart from "this port
+// slice doesn't cover it yet".
+class NotImplementedError : public Error {
+public:
+    explicit NotImplementedError(const std::string& what) : Error("not implemented: " + what) {}
+};
+
 class UserFrozenError : public Error {
 public:
     UserFrozenError() : Error("user account frozen") {}
