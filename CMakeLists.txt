@@ -40,6 +40,9 @@ target_compile_options(shuzagram_store_postgres PRIVATE -Wall -Wextra)
 
 add_library(shuzagram_mtproto
   src/mtproto/crypto/aes_ige.cpp
+  src/mtproto/crypto/rsa.cpp
+  src/mtproto/crypto/rsa_pad.cpp
+  src/mtproto/crypto/random.cpp
 )
 target_include_directories(shuzagram_mtproto PUBLIC include)
 target_link_libraries(shuzagram_mtproto PUBLIC OpenSSL::Crypto)

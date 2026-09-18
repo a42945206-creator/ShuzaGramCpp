@@ -5,11 +5,14 @@
 // below are transcribed directly from gotd/ige's ige_test.go (not via hex
 // strings) to avoid transcription drift.
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 #include "shuzagram/mtproto/crypto/aes_ige.hpp"
+#include "shuzagram/mtproto/crypto/rsa.hpp"
+#include "shuzagram/mtproto/crypto/rsa_pad.hpp"
 
 namespace {
 
@@ -66,10 +69,86 @@ void TestAesIgeOfficialVectors() {
     }
 }
 
+// gotd/td's crypto/rsa_pad_test.go: TestRSAPad. Fixed public key + an
+// all-zero randomness source ("testutil.ZeroRand{}") + 144 'a' bytes must
+// produce this exact 256-byte ciphertext. Verifies RsaPad, RsaPublicKey::
+// FromPkcs1Pem and RsaPublicKey::EncryptRaw all agree with upstream
+// byte-for-byte.
+const char* const kTestRsaPublicKeyPem =
+    "-----BEGIN RSA PUBLIC KEY-----\n"
+    "MIIBCgKCAQEA6LszBcC1LGzyr992NzE0ieY+BSaOW622Aa9Bd4ZHLl+TuFQ4lo4g\n"
+    "5nKaMBwK/BIb9xUfg0Q29/2mgIR6Zr9krM7HjuIcCzFvDtr+L0GQjae9H0pRB2OO\n"
+    "62cECs5HKhT5DZ98K33vmWiLowc621dQuwKWSQKjWf50XYFw42h21P2KXUGyp2y/\n"
+    "+aEyZ+uVgLLQbRA1dEjSDZ2iGRy12Mk5gpYc397aYp438fsJoHIgJ2lgMv5h7WY9\n"
+    "t6N/byY9Nw9p21Og3AoXSL2q/2IJ1WRUhebgAdGVMlV1fkuOQoEzR7EdpqtQD9Cs\n"
+    "5+bfo3Nhmcyvk5ftB0WkJ9z6bNZ7yxrP8wIDAQAB\n"
+    "-----END RSA PUBLIC KEY-----\n";
+
+std::vector<std::uint8_t> HexToBytes(const std::string& hex) {
+    std::vector<std::uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
+        out.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+    }
+    return out;
+}
+
+void TestRsaPadOfficialVector() {
+    using shuzagram::mtproto::crypto::RsaPad;
+    using shuzagram::mtproto::crypto::RsaPublicKey;
+
+    const RsaPublicKey key = RsaPublicKey::FromPkcs1Pem(kTestRsaPublicKeyPem);
+    const std::vector<std::uint8_t> data(144, 'a');
+    const auto zero_rand = [](std::uint8_t* buf, std::size_t len) { std::fill(buf, buf + len, 0); };
+
+    const auto encrypted = RsaPad(data, key, zero_rand);
+    Check(encrypted.size() == 256, "RsaPad output is 256 bytes");
+
+    const std::string expected_hex =
+        "bf68719e836806b040cd261ecaf66eb3c4ba19f3bbea3031b2e6cf29167bab647201d101b291dc"
+        "5b716a42e789a38d947fe59e9bcce8f30ef46a946743ea8b6babbce7fc0afc46b802aa453e83471d82a4dfad83f971f35"
+        "0b4b4fb474cd1c48fdf427e4b5fecce9ec3178ae7dac3985856fdefa21d6fdc5e0e0fd8a57bc4f51580d637d372be8d87"
+        "c9aa3fde8e6f8287bcb3be846aadcdd59465375479e248f62ed438f9804fbe36d41ca906243a5f740f3937949aa149ba8"
+        "a8b8e68b3f3e1e3cd3f946387520e21eee55845e1f015a919a22f6a72bfaecd2cae946c91983b41f9ffabe97963bbde8f"
+        "30eaf5fd3c5b8cecab8711bd269e441b6084f385726ff0";
+    Check(encrypted == HexToBytes(expected_hex), "RsaPad matches gotd/td's TestRSAPad vector exactly");
+}
+
+void TestRsaGenerateSaveLoadRoundTrip() {
+    using shuzagram::mtproto::crypto::RsaPrivateKey;
+
+    const RsaPrivateKey key = RsaPrivateKey::Generate(2048);
+    const std::string pem = key.ToPkcs1Pem();
+    Check(pem.find("-----BEGIN RSA PRIVATE KEY-----") == 0, "generated key PEM has the PKCS#1 header Go expects");
+
+    const RsaPrivateKey reloaded = RsaPrivateKey::FromPkcs1Pem(pem);
+    Check(reloaded.Fingerprint() == key.Fingerprint(), "PEM round-trip preserves the key (same fingerprint)");
+}
+
+void TestRsaPadUnpadRoundTrip() {
+    using shuzagram::mtproto::crypto::RsaPad;
+    using shuzagram::mtproto::crypto::RsaPrivateKey;
+    using shuzagram::mtproto::crypto::RsaUnpad;
+
+    const RsaPrivateKey key = RsaPrivateKey::Generate(2048);
+    std::vector<std::uint8_t> payload(100);
+    for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<std::uint8_t>(i);
+
+    const auto encrypted = RsaPad(payload, key.PublicKey());
+    const auto decoded = RsaUnpad(encrypted, key);
+
+    Check(decoded.size() == 192, "RsaUnpad always returns the full 192-byte data_with_padding");
+    Check(std::equal(payload.begin(), payload.end(), decoded.begin()),
+          "RsaUnpad recovers the original payload from its own RsaPad output");
+}
+
 } // namespace
 
 int main() {
     TestAesIgeOfficialVectors();
+    TestRsaPadOfficialVector();
+    TestRsaGenerateSaveLoadRoundTrip();
+    TestRsaPadUnpadRoundTrip();
     if (g_failures == 0) {
         std::printf("all mtproto crypto tests passed\n");
         return 0;
