@@ -50,6 +50,7 @@ add_library(shuzagram_mtproto
   src/net/tcp_socket.cpp
   src/net/tcp_listener.cpp
   src/mtproto/tcp_handshake_server.cpp
+  src/mtproto/session.cpp
 )
 target_include_directories(shuzagram_mtproto PUBLIC include)
 find_package(Threads REQUIRED)

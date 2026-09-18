@@ -1,0 +1,128 @@
+#include "shuzagram/mtproto/session.hpp"
+
+#include <chrono>
+#include <cstdio>
+#include <stdexcept>
+
+#include "shuzagram/mtproto/messages/system.hpp"
+#include "shuzagram/mtproto/unencrypted_message.hpp"
+
+namespace shuzagram::mtproto {
+
+MtprotoSession::MtprotoSession(crypto::AuthKeyBytes auth_key, std::int64_t session_id, std::int64_t server_salt,
+                                crypto::Side my_side, const RpcHandlerRegistry* registry)
+    : auth_key_(auth_key), session_id_(session_id), server_salt_(server_salt), my_side_(my_side), registry_(registry) {}
+
+std::int64_t MtprotoSession::NextSeqNo(bool content_related) {
+    // Official formula (core.telegram.org/mtproto/description#message-sequence-number-msg-seqno):
+    // a content-related message gets 2N+1 (then N increments); a
+    // non-content one gets 2N using the current N without incrementing.
+    if (content_related) {
+        const std::int64_t seq = 2 * content_seq_counter_ + 1;
+        ++content_seq_counter_;
+        return seq;
+    }
+    return 2 * content_seq_counter_;
+}
+
+crypto::EncryptedMessage MtprotoSession::EncryptOutgoing(const std::vector<std::uint8_t>& body) {
+    const std::int64_t msg_id = MessageId::New(std::chrono::system_clock::now(), MessageType::kServerResponse).Raw();
+    const std::int32_t seq_no = static_cast<std::int32_t>(NextSeqNo(/*content_related=*/true));
+    return crypto::EncryptMessage(auth_key_, server_salt_, session_id_, msg_id, seq_no, body, my_side_);
+}
+
+std::vector<std::uint8_t> MtprotoSession::DispatchOne(std::int64_t msg_id, const std::vector<std::uint8_t>& body) {
+    using namespace messages;
+
+    TLBuffer b;
+    b.buf = body;
+    const std::uint32_t id = b.PeekID();
+
+    if (id == Ping::kTypeId) {
+        b.ConsumeID(id);
+        Ping ping;
+        ping.DecodeBare(b);
+        Pong pong;
+        pong.msg_id = msg_id; // the incoming message's own id, per spec -- not a fresh one
+        pong.ping_id = ping.ping_id;
+        TLBuffer out;
+        pong.Encode(out);
+        return out.buf;
+    }
+    if (id == MsgsAck::kTypeId) {
+        // Nothing to do this round: we don't track our own outbound
+        // delivery-confirmation state yet (see NOTES/rpc-dispatch-plan.md).
+        return {};
+    }
+
+    // Anything else is treated as an RPC call (this project implements no
+    // actual business methods -- see NOTES/rpc-dispatch-plan.md).
+    std::vector<std::uint8_t> result;
+    if (registry_) {
+        if (const RpcHandler* handler = registry_->Find(id)) {
+            b.ConsumeID(id);
+            result = (*handler)(id, b);
+        }
+    }
+    if (result.empty()) {
+        RpcError error;
+        error.error_code = 400;
+        char hex[11];
+        std::snprintf(hex, sizeof(hex), "0x%08x", id);
+        error.error_message = std::string("METHOD_NOT_FOUND ") + hex;
+        TLBuffer out;
+        error.Encode(out);
+        result = out.buf;
+    }
+
+    RpcResult wrapped;
+    wrapped.req_msg_id = msg_id;
+    wrapped.result = std::move(result);
+    TLBuffer out;
+    wrapped.Encode(out);
+    return out.buf;
+}
+
+std::vector<crypto::EncryptedMessage> MtprotoSession::HandleEncrypted(const crypto::EncryptedMessage& incoming) {
+    const crypto::EncryptedMessageData data =
+        crypto::DecryptMessage(auth_key_, incoming, my_side_);
+    // session_id is the client's to set; the server just mirrors whatever
+    // it used back on every outgoing message within this session, rather
+    // than needing to know it up front at construction time.
+    session_id_ = data.session_id;
+
+    if (data.message_id <= last_seen_msg_id_) {
+        // A real implementation also has to tell "duplicate retransmit of
+        // an already-answered message" apart from "a genuine replay
+        // attack" and often needs to resend the previous answer rather
+        // than just rejecting -- deliberately simplified here, see
+        // NOTES/rpc-dispatch-plan.md.
+        throw std::runtime_error("msg_id is not strictly increasing (possible replay)");
+    }
+    last_seen_msg_id_ = data.message_id;
+
+    std::vector<InnerMessage> inner;
+    {
+        TLBuffer b;
+        b.buf = data.message_data;
+        const std::uint32_t id = b.PeekID();
+        if (id == messages::MsgContainer::kTypeId) {
+            b.ConsumeID(id);
+            messages::MsgContainer container;
+            container.DecodeBare(b);
+            inner.reserve(container.messages.size());
+            for (auto& m : container.messages) inner.push_back({m.msg_id, std::move(m.body)});
+        } else {
+            inner.push_back({data.message_id, data.message_data});
+        }
+    }
+
+    std::vector<crypto::EncryptedMessage> replies;
+    for (const auto& m : inner) {
+        std::vector<std::uint8_t> response = DispatchOne(m.msg_id, m.body);
+        if (!response.empty()) replies.push_back(EncryptOutgoing(response));
+    }
+    return replies;
+}
+
+} // namespace shuzagram::mtproto

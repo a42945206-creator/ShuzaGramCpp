@@ -3,12 +3,15 @@
 #include <optional>
 #include <thread>
 
+#include "shuzagram/mtproto/crypto/message_cipher.hpp"
+#include "shuzagram/mtproto/session.hpp"
 #include "shuzagram/mtproto/transport/detect_codec.hpp"
 
 namespace shuzagram::mtproto {
 
-TcpHandshakeServer::TcpHandshakeServer(const std::string& bind_address, std::uint16_t port, crypto::RsaPrivateKey key)
-    : listener_(bind_address, port), key_(std::move(key)) {}
+TcpHandshakeServer::TcpHandshakeServer(const std::string& bind_address, std::uint16_t port, crypto::RsaPrivateKey key,
+                                        const RpcHandlerRegistry* rpc_registry)
+    : listener_(bind_address, port), key_(std::move(key)), rpc_registry_(rpc_registry) {}
 
 void TcpHandshakeServer::Run(const SuccessHandler& on_success, const FailureHandler& on_failure) {
     // Polls with a short timeout rather than blocking in Accept()
@@ -34,6 +37,31 @@ void TcpHandshakeServer::Run(const SuccessHandler& on_success, const FailureHand
                     [&] { return detected.codec->Read(detected.read); },
                     [&](const std::vector<std::uint8_t>& frame) { detected.codec->Write(writer, frame); });
                 if (on_success) on_success(result);
+
+                if (!rpc_registry_) return; // old behavior: close right after the handshake
+
+                // Continue serving this same connection: read encrypted
+                // frames, dispatch them through MtprotoSession, write back
+                // whatever replies it produces, until the connection ends.
+                // session_id starts at 0 -- MtprotoSession adopts the
+                // client's real one from the first decrypted message (see
+                // its own header comment).
+                MtprotoSession session(result.auth_key, /*session_id=*/0, result.server_salt, crypto::Side::kServer,
+                                       rpc_registry_);
+                for (;;) {
+                    const auto frame = detected.codec->Read(detected.read);
+                    TLBuffer frame_buf;
+                    frame_buf.buf = frame;
+                    crypto::EncryptedMessage encrypted;
+                    encrypted.Decode(frame_buf);
+
+                    const auto replies = session.HandleEncrypted(encrypted);
+                    for (const auto& reply : replies) {
+                        TLBuffer out;
+                        reply.Encode(out);
+                        detected.codec->Write(writer, out.buf);
+                    }
+                }
             } catch (const std::exception& e) {
                 if (on_failure) on_failure(e.what());
             } catch (...) {

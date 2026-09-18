@@ -5,13 +5,15 @@
 #include <string>
 
 #include "shuzagram/mtproto/crypto/rsa.hpp"
+#include "shuzagram/mtproto/rpc_dispatch.hpp"
 #include "shuzagram/mtproto/server_exchange.hpp"
 #include "shuzagram/net/tcp_listener.hpp"
 
-// Wires TcpListener + transport::DetectCodec + ServerExchange together: the
-// first piece of this project that actually listens on a real TCP port.
-// One thread per accepted connection (a real epoll/async-IO event loop is a
-// deliberately separate, later piece -- see NOTES/tcp-wiring-plan.md).
+// Wires TcpListener + transport::DetectCodec + ServerExchange (+ optionally
+// MtprotoSession) together: the first piece of this project that actually
+// listens on a real TCP port. One thread per accepted connection (a real
+// epoll/async-IO event loop is a deliberately separate, later piece -- see
+// NOTES/tcp-wiring-plan.md).
 //
 // Deliberately independent of the store:: layer: what happens with a
 // completed handshake (persisting the auth_key, and everything after) is
@@ -22,7 +24,17 @@ namespace shuzagram::mtproto {
 
 class TcpHandshakeServer {
 public:
-    TcpHandshakeServer(const std::string& bind_address, std::uint16_t port, crypto::RsaPrivateKey key);
+    // rpc_registry == nullptr (the default): a connection is closed right
+    // after its handshake completes, exactly as in the first TCP-wiring
+    // round -- what every existing caller/test still gets unchanged.
+    // rpc_registry != nullptr: after on_success runs, the SAME connection
+    // continues to be served by an MtprotoSession built from that registry
+    // (still answering ping/msgs_ack/unknown-method-error even if the
+    // registry itself has no business handlers registered), until the
+    // connection closes or a session-level error occurs. The pointee must
+    // outlive this server.
+    TcpHandshakeServer(const std::string& bind_address, std::uint16_t port, crypto::RsaPrivateKey key,
+                        const RpcHandlerRegistry* rpc_registry = nullptr);
 
     [[nodiscard]] std::uint16_t Port() const { return listener_.Port(); }
 
@@ -30,8 +42,10 @@ public:
     // concurrently from several threads for several connections at once,
     // callers must be thread-safe) once a connection's handshake succeeds.
     using SuccessHandler = std::function<void(const ServerExchangeResult&)>;
-    // Called on any failure (bad transport, failed handshake, I/O error).
-    // Purely informational -- the connection is closed either way.
+    // Called on any failure (bad transport, failed handshake, I/O error, or
+    // -- when rpc_registry is set -- an ordinary connection close/error
+    // while serving that connection's session). Purely informational; the
+    // connection is closed either way.
     using FailureHandler = std::function<void(const std::string& what)>;
 
     // Blocks, accepting connections and spawning one detached worker thread
@@ -48,6 +62,7 @@ public:
 private:
     net::TcpListener listener_;
     crypto::RsaPrivateKey key_;
+    const RpcHandlerRegistry* rpc_registry_;
     std::atomic<bool> stopping_{false};
 };
 
