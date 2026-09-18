@@ -7,6 +7,7 @@
 #include <openssl/sha.h>
 
 #include "bignum_util.hpp"
+#include "shuzagram/mtproto/crypto/aes_ige.hpp"
 #include "shuzagram/mtproto/crypto/rsa.hpp" // kRsaKeyBits
 
 namespace shuzagram::mtproto::crypto {
@@ -57,6 +58,19 @@ std::size_t PaddedLen16(std::size_t l) {
 std::vector<std::uint8_t> ModPow(const std::vector<std::uint8_t>& base, const std::vector<std::uint8_t>& exponent,
                                   const std::vector<std::uint8_t>& modulus) {
     return detail::ModPow(base, exponent, modulus);
+}
+
+std::vector<std::uint8_t> ModPowFixed(const std::vector<std::uint8_t>& base, const std::vector<std::uint8_t>& exponent,
+                                       const std::vector<std::uint8_t>& modulus, std::size_t fixed_len) {
+    detail::CtxPtr ctx(BN_CTX_new(), &BN_CTX_free);
+    BignumPtr b = BytesToBignum(base);
+    BignumPtr e = BytesToBignum(exponent);
+    BignumPtr n = BytesToBignum(modulus);
+    BignumPtr result = MakeBignum();
+    if (!BN_mod_exp(result.get(), b.get(), e.get(), n.get(), ctx.get())) {
+        throw std::runtime_error("BN_mod_exp failed");
+    }
+    return detail::BignumToFixedBytes(result.get(), fixed_len);
 }
 
 void CheckGP(int g, const std::vector<std::uint8_t>& p) {
@@ -172,6 +186,18 @@ std::vector<std::uint8_t> GuessDataWithHash(const std::vector<std::uint8_t>& dat
         if (Sha1(candidate) == want) return candidate;
     }
     throw std::runtime_error("GuessDataWithHash: no padding length matched the stored hash");
+}
+
+std::vector<std::uint8_t> EncryptExchangeAnswer(const std::vector<std::uint8_t>& answer,
+                                                 const std::vector<std::uint8_t>& key,
+                                                 const std::vector<std::uint8_t>& iv, const RandomFill& rand) {
+    return IgeEncrypt(key, iv, DataWithHash(answer, rand));
+}
+
+std::vector<std::uint8_t> DecryptExchangeAnswer(const std::vector<std::uint8_t>& data,
+                                                 const std::vector<std::uint8_t>& key,
+                                                 const std::vector<std::uint8_t>& iv) {
+    return GuessDataWithHash(IgeDecrypt(key, iv, data));
 }
 
 } // namespace shuzagram::mtproto::crypto

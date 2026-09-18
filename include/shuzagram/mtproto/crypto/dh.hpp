@@ -19,6 +19,13 @@ namespace shuzagram::mtproto::crypto {
 std::vector<std::uint8_t> ModPow(const std::vector<std::uint8_t>& base, const std::vector<std::uint8_t>& exponent,
                                   const std::vector<std::uint8_t>& modulus);
 
+// Same, but zero-padded to exactly fixed_len bytes (throws if the true
+// result doesn't fit) -- what the final auth_key computation needs (a
+// fixed 256-byte value), matching Go's crypto.FillBytes-checked call in
+// server_flow.go ("auth_key is too big" on failure).
+std::vector<std::uint8_t> ModPowFixed(const std::vector<std::uint8_t>& base, const std::vector<std::uint8_t>& exponent,
+                                       const std::vector<std::uint8_t>& modulus, std::size_t fixed_len);
+
 // g must be one of {2,3,4,5,6,7}, and must generate a cyclic subgroup of
 // prime order (p-1)/2 mod p (a quadratic residue). Throws
 // std::invalid_argument on an unsupported g, std::runtime_error if g is not
@@ -62,5 +69,18 @@ std::vector<std::uint8_t> DataWithHash(const std::vector<std::uint8_t>& data, co
 // when decrypting a peer-produced Server_DH_Params/Set_client_DH_params
 // payload whose padding length isn't otherwise known.
 std::vector<std::uint8_t> GuessDataWithHash(const std::vector<std::uint8_t>& data_with_hash);
+
+// EncryptExchangeAnswer/DecryptExchangeAnswer (crypto/exchange.go): the
+// DataWithHash-then-AES-IGE composition Server_DH_Params.encrypted_answer
+// and Set_client_DH_params.encrypted_data are wrapped in, keyed by
+// TempAesKeys. key/iv are exactly what TempAesKeys produced (32 bytes
+// each).
+std::vector<std::uint8_t> EncryptExchangeAnswer(const std::vector<std::uint8_t>& answer,
+                                                 const std::vector<std::uint8_t>& key,
+                                                 const std::vector<std::uint8_t>& iv,
+                                                 const RandomFill& rand = SystemRandomFill);
+std::vector<std::uint8_t> DecryptExchangeAnswer(const std::vector<std::uint8_t>& data,
+                                                 const std::vector<std::uint8_t>& key,
+                                                 const std::vector<std::uint8_t>& iv);
 
 } // namespace shuzagram::mtproto::crypto

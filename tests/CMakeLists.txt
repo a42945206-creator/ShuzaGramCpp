@@ -11,3 +11,8 @@ target_link_libraries(auth_store_smoke PRIVATE shuzagram_store_postgres)
 add_executable(mtproto_crypto_test mtproto_crypto_test.cpp)
 target_link_libraries(mtproto_crypto_test PRIVATE shuzagram_mtproto)
 add_test(NAME mtproto_crypto_test COMMAND mtproto_crypto_test)
+
+find_package(Threads REQUIRED)
+add_executable(mtproto_handshake_test mtproto_handshake_test.cpp)
+target_link_libraries(mtproto_handshake_test PRIVATE shuzagram_mtproto Threads::Threads)
+add_test(NAME mtproto_handshake_test COMMAND mtproto_handshake_test)
