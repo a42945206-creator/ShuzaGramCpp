@@ -7,3 +7,7 @@ target_link_libraries(user_store_smoke PRIVATE shuzagram_store_postgres)
 
 add_executable(auth_store_smoke auth_store_smoke.cpp)
 target_link_libraries(auth_store_smoke PRIVATE shuzagram_store_postgres)
+
+add_executable(mtproto_crypto_test mtproto_crypto_test.cpp)
+target_link_libraries(mtproto_crypto_test PRIVATE shuzagram_mtproto)
+add_test(NAME mtproto_crypto_test COMMAND mtproto_crypto_test)

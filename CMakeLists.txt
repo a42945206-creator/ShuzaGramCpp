@@ -38,5 +38,12 @@ target_link_libraries(shuzagram_store_postgres PUBLIC shuzagram_domain PkgConfig
                                                         nlohmann_json::nlohmann_json OpenSSL::Crypto)
 target_compile_options(shuzagram_store_postgres PRIVATE -Wall -Wextra)
 
+add_library(shuzagram_mtproto
+  src/mtproto/crypto/aes_ige.cpp
+)
+target_include_directories(shuzagram_mtproto PUBLIC include)
+target_link_libraries(shuzagram_mtproto PUBLIC OpenSSL::Crypto)
+target_compile_options(shuzagram_mtproto PRIVATE -Wall -Wextra)
+
 enable_testing()
 add_subdirectory(tests)
