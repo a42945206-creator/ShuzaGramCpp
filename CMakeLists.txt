@@ -46,6 +46,7 @@ add_library(shuzagram_mtproto
   src/mtproto/crypto/dh.cpp
   src/mtproto/server_exchange.cpp
   src/mtproto/transport/full_codec.cpp
+  src/mtproto/crypto/message_cipher.cpp
 )
 target_include_directories(shuzagram_mtproto PUBLIC include)
 target_link_libraries(shuzagram_mtproto PUBLIC OpenSSL::Crypto)

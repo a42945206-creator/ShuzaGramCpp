@@ -24,3 +24,7 @@ add_test(NAME mtproto_transport_test COMMAND mtproto_transport_test)
 add_executable(mtproto_integration_test mtproto_integration_test.cpp)
 target_link_libraries(mtproto_integration_test PRIVATE shuzagram_mtproto Threads::Threads)
 add_test(NAME mtproto_integration_test COMMAND mtproto_integration_test)
+
+add_executable(mtproto_message_cipher_test mtproto_message_cipher_test.cpp)
+target_link_libraries(mtproto_message_cipher_test PRIVATE shuzagram_mtproto)
+add_test(NAME mtproto_message_cipher_test COMMAND mtproto_message_cipher_test)

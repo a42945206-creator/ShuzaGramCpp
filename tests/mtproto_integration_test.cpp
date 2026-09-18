@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "shuzagram/mtproto/crypto/dh.hpp"
+#include "shuzagram/mtproto/crypto/message_cipher.hpp"
 #include "shuzagram/mtproto/crypto/random.hpp"
 #include "shuzagram/mtproto/crypto/rsa.hpp"
 #include "shuzagram/mtproto/crypto/rsa_pad.hpp"
@@ -347,6 +348,26 @@ int main() {
           "client and server derive the identical auth_key end to end over real transport framing");
     Check(client_result.server_salt == server_result.server_salt,
           "client and server derive the identical server_salt end to end over real transport framing");
+
+    // Full-chain capstone: the auth_key this handshake just produced (over
+    // real transport framing, not a bare in-memory frame queue) actually
+    // works to encrypt/decrypt an ordinary post-handshake message -- the
+    // thing all of this exists to make possible. Uses
+    // crypto::EncryptMessage/DecryptMessage directly (already verified
+    // against official vectors in mtproto_message_cipher_test.cpp); the
+    // point here is only that the auth_key from THIS pipeline is a valid
+    // key for THAT cipher, not re-testing the cipher itself.
+    {
+        using namespace shuzagram::mtproto::crypto;
+        const std::vector<std::uint8_t> rpc_message = {'p', 'i', 'n', 'g', 0, 0, 0, 0};
+        const EncryptedMessage wire = EncryptMessage(client_result.auth_key, client_result.server_salt,
+                                                      /*session_id=*/987654321, /*message_id=*/1, /*seq_no=*/1,
+                                                      rpc_message, Side::kClient);
+        const EncryptedMessageData decrypted = DecryptMessage(server_result.auth_key, wire, Side::kServer);
+        Check(decrypted.message_data == rpc_message,
+              "the handshake's own auth_key correctly encrypts (as client) and decrypts (as server) a real message");
+        Check(decrypted.salt == client_result.server_salt, "decrypted message carries the handshake's own server_salt");
+    }
 
     if (g_failures == 0) {
         std::printf("all mtproto integration tests passed\n");
