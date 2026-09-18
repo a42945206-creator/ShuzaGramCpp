@@ -1,0 +1,6 @@
+add_executable(domain_test domain_test.cpp)
+target_link_libraries(domain_test PRIVATE shuzagram_domain)
+add_test(NAME domain_test COMMAND domain_test)
+
+add_executable(user_store_smoke user_store_smoke.cpp)
+target_link_libraries(user_store_smoke PRIVATE shuzagram_store_postgres)
