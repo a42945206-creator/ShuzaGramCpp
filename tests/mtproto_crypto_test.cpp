@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "shuzagram/mtproto/crypto/aes_ige.hpp"
+#include "shuzagram/mtproto/crypto/dh.hpp"
 #include "shuzagram/mtproto/crypto/rsa.hpp"
 #include "shuzagram/mtproto/crypto/rsa_pad.hpp"
 
@@ -142,6 +143,131 @@ void TestRsaPadUnpadRoundTrip() {
           "RsaUnpad recovers the original payload from its own RsaPad output");
 }
 
+// The official worked example from
+// https://core.telegram.org/mtproto/samples-auth_key -- "Server DH inner
+// data decomposition" static case, also gotd/td's crypto/dh_test.go:
+// TestGAB/Static. Real dh_prime, real g_a from a real (if illustrative)
+// handshake, a fixed secret exponent b, and the g_b Telegram's own docs say
+// that combination must produce. Exercises ModPow and CheckDHParams
+// together against a source with zero connection to this codebase.
+void TestDiffieHellmanOfficialVector() {
+    using shuzagram::mtproto::crypto::CheckDHParams;
+    using shuzagram::mtproto::crypto::ModPow;
+
+    const auto dh_prime = HexToBytes(
+        "C71CAEB9C6B1C9048E6C522F70F13F73"
+        "980D40238E3E21C14934D037563D930F"
+        "48198A0AA7C14058229493D22530F4DB"
+        "FA336F6E0AC925139543AED44CCE7C37"
+        "20FD51F69458705AC68CD4FE6B6B13AB"
+        "DC9746512969328454F18FAF8C595F64"
+        "2477FE96BB2A941D5BCD1D4AC8CC4988"
+        "0708FA9B378E3C4F3A9060BEE67CF9A4"
+        "A4A695811051907E162753B56B0F6B41"
+        "0DBA74D8A84B2A14B3144E0EF1284754"
+        "FD17ED950D5965B4B9DD46582DB1178D"
+        "169C6BC465B0D6FF9CA3928FEF5B9AE4"
+        "E418FC15E83EBEA0F87FA9FF5EED7005"
+        "0DED2849F47BF959D956850CE929851F"
+        "0D8115F635B105EE2E4E15D04B2454BF"
+        "6F4FADF034B10403119CD8E3B92FCC5B");
+    const auto g_a = HexToBytes(
+        "262AABA621CC4DF587DC94CF8252258C"
+        "0B9337DFB47545A49CDD5C9B8EAE7236"
+        "C6CADC40B24E88590F1CC2CC762EBF1C"
+        "F11DCC0B393CAAD6CEE4EE5848001C73"
+        "ACBB1D127E4CB93072AA3D1C8151B6FB"
+        "6AA6124B7CD782EAF981BDCFCE9D7A00"
+        "E423BD9D194E8AF78EF6501F415522E4"
+        "4522281C79D906DDB79C72E9C63D83FB"
+        "2A940FF779DFB5F2FD786FB4AD71C9F0"
+        "8CF48758E534E9815F634F1E3A80A5E1"
+        "C2AF210C5AB762755AD4B2126DFA61A7"
+        "7FA9DA967D65DFD0AFB5CDF26C4D4E1A"
+        "88B180F4E0D0B45BA1484F95CB2712B5"
+        "0BF3F5968D9D55C99C0FB9FB67BFF56D"
+        "7D4481B634514FBA3488C4CDA2FC0659"
+        "990E8E868B28632875A9AA703BCDCE8F");
+    const auto b = HexToBytes(
+        "6F620AFA575C9233EB4C014110A7BCAF49464F798A18A0981FEA1E05E8DA"
+        "67D9681E0FD6DF0EDF0272AE3492451A84502F2EFC0DA18741A5FB80BD82296919A70FAA6D07CBBBCA2037EA7D3E327B61D"
+        "585ED3373EE0553A91CBD29B01FA9A89D479CA53D57BDE3A76FBD922A923A0A38B922C1D0701F53FF52D7EA9217080163A64901"
+        "E766EB6A0F20BC391B64B9D1DD2CD13A7D0C946A3A7DF8CEC9E2236446F646C42CFE2B60A2A8D776E56C8D7519B08B88ED0970E"
+        "10D12A8C9E355D765F2B7BBB7B4CA9360083435523CB0D57D2B106FD14F94B4EEE79D8AC131CA56AD389C84FE279716F8124A54"
+        "3337FB9EA3D988EC5FA63D90A4BA3970E7A39E5C0DE5");
+    const auto want_g_b = HexToBytes(
+        "73700E7BFC7AEEC828EB8E0DCC04D09A"
+        "0DD56A1B4B35F72F0B55FCE7DB7EBB72"
+        "D7C33C5D4AA59E1C74D09B01AE536B31"
+        "8CFED436AFDB15FE9EB4C70D7F0CB14E"
+        "46DBBDE9053A64304361EB358A9BB32E"
+        "9D5C2843FE87248B89C3F066A7D5876D"
+        "61657ACC52B0D81CD683B2A0FA93E8AD"
+        "AB20377877F3BC3369BBF57B10F5B589"
+        "E65A9C27490F30A0C70FFCFD3453F5B3"
+        "79C1B9727A573CFFDCA8D23C721B135B"
+        "92E529B1CDD2F7ABD4F34DAC4BE1EEAF"
+        "60993DDE8ED45890E4F47C26F2C0B2E0"
+        "37BB502739C8824F2A99E2B1E7E41658"
+        "3417CC79A8807A4BDAC6A5E9805D4F61"
+        "86C37D66F6988C9F9C752896F3D34D25"
+        "529263FAF2670A09B2A59CE35264511F");
+
+    const std::vector<std::uint8_t> g2 = {0x02};
+    const auto g_b = ModPow(g2, b, dh_prime);
+    Check(g_b == want_g_b, "ModPow(g=2, b, dh_prime) matches the official Telegram sample's g_b");
+
+    try {
+        CheckDHParams(dh_prime, 2, g_a, g_b);
+        Check(true, "CheckDHParams accepts the official sample's (dh_prime, g, g_a, g_b)");
+    } catch (const std::exception& e) {
+        Check(false, std::string("CheckDHParams unexpectedly rejected the official sample: ") + e.what());
+    }
+}
+
+void TestTempAesKeysAndServerSaltSelfConsistent() {
+    using namespace shuzagram::mtproto;
+    using namespace shuzagram::mtproto::crypto;
+
+    Int256 new_nonce{};
+    Int128 server_nonce{};
+    for (std::size_t i = 0; i < new_nonce.size(); ++i) new_nonce[i] = static_cast<std::uint8_t>(i + 1);
+    for (std::size_t i = 0; i < server_nonce.size(); ++i) server_nonce[i] = static_cast<std::uint8_t>(0x80 + i);
+
+    std::vector<std::uint8_t> key, iv;
+    TempAesKeys(new_nonce, server_nonce, key, iv);
+    Check(key.size() == 32, "TempAesKeys key is 32 bytes (AES-256)");
+    Check(iv.size() == 32, "TempAesKeys iv is 32 bytes (two IGE IVs)");
+
+    // encrypt/decrypt through IGE with these derived keys should round-trip
+    // -- ties TempAesKeys to the already-verified IGE implementation.
+    const std::vector<std::uint8_t> plaintext(64, 0x42);
+    const auto ciphertext = IgeEncrypt(key, iv, plaintext);
+    Check(IgeDecrypt(key, iv, ciphertext) == plaintext, "TempAesKeys-derived key/iv round-trip through AES-IGE");
+
+    const std::int64_t salt1 = ServerSalt(new_nonce, server_nonce);
+    const std::int64_t salt2 = ServerSalt(new_nonce, server_nonce);
+    Check(salt1 == salt2, "ServerSalt is deterministic for the same nonces");
+
+    std::array<std::uint8_t, 256> auth_key{};
+    for (std::size_t i = 0; i < auth_key.size(); ++i) auth_key[i] = static_cast<std::uint8_t>(i);
+    const Int128 hash1 = NonceHash1(new_nonce, auth_key);
+    const Int128 hash1_again = NonceHash1(new_nonce, auth_key);
+    Check(hash1 == hash1_again, "NonceHash1 is deterministic");
+}
+
+void TestDataWithHashRoundTrip() {
+    using namespace shuzagram::mtproto::crypto;
+
+    const std::vector<std::uint8_t> payload = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    const auto wrapped = DataWithHash(payload);
+    Check(wrapped.size() % 16 == 0, "DataWithHash output is padded to a multiple of 16");
+    Check(wrapped.size() >= payload.size() + 20, "DataWithHash output holds the SHA1 prefix plus the payload");
+
+    const auto recovered = GuessDataWithHash(wrapped);
+    Check(recovered == payload, "GuessDataWithHash recovers the exact original payload");
+}
+
 } // namespace
 
 int main() {
@@ -149,6 +275,9 @@ int main() {
     TestRsaPadOfficialVector();
     TestRsaGenerateSaveLoadRoundTrip();
     TestRsaPadUnpadRoundTrip();
+    TestDiffieHellmanOfficialVector();
+    TestTempAesKeysAndServerSaltSelfConsistent();
+    TestDataWithHashRoundTrip();
     if (g_failures == 0) {
         std::printf("all mtproto crypto tests passed\n");
         return 0;

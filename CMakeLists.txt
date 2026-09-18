@@ -43,6 +43,7 @@ add_library(shuzagram_mtproto
   src/mtproto/crypto/rsa.cpp
   src/mtproto/crypto/rsa_pad.cpp
   src/mtproto/crypto/random.cpp
+  src/mtproto/crypto/dh.cpp
 )
 target_include_directories(shuzagram_mtproto PUBLIC include)
 target_link_libraries(shuzagram_mtproto PUBLIC OpenSSL::Crypto)

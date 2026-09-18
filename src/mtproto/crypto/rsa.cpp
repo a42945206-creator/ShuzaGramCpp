@@ -15,43 +15,27 @@
 
 #include "shuzagram/mtproto/tl_buffer.hpp"
 
+#include "bignum_util.hpp"
+
 namespace shuzagram::mtproto::crypto {
 
 namespace {
 
-using BignumPtr = std::unique_ptr<BIGNUM, decltype(&BN_free)>;
-using CtxPtr = std::unique_ptr<BN_CTX, decltype(&BN_CTX_free)>;
+using detail::BignumPtr;
+using detail::BytesToBignum;
+using detail::MakeBignum;
 using PkeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
 using PkeyCtxPtr = std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>;
 using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
 
-BignumPtr MakeBignum() { return {BN_new(), &BN_free}; }
-
-BignumPtr BytesToBignum(const std::vector<std::uint8_t>& b) {
-    BignumPtr bn = MakeBignum();
-    if (!BN_bin2bn(b.data(), static_cast<int>(b.size()), bn.get())) {
-        throw std::runtime_error("BN_bin2bn failed");
-    }
-    return bn;
-}
-
-std::vector<std::uint8_t> BignumToBytes(const BIGNUM* bn, std::size_t fixed_len) {
-    std::vector<std::uint8_t> out(fixed_len);
-    if (BN_num_bytes(bn) > static_cast<int>(fixed_len)) {
-        throw std::runtime_error("RSA raw transform result does not fit in the expected length");
-    }
-    if (!BN_bn2binpad(bn, out.data(), static_cast<int>(fixed_len))) {
-        throw std::runtime_error("BN_bn2binpad failed");
-    }
-    return out;
-}
-
-// z^e mod n (or c^d mod n) via OpenSSL BIGNUM, padded/checked to fixed_len
-// bytes -- the shared implementation of both RsaPublicKey::EncryptRaw and
-// RsaPrivateKey::DecryptRaw (rsaEncrypt/rsaDecrypt in gotd/td's crypto/rsa.go).
+// z^e mod n (or c^d mod n), fixed-length-padded -- the shared implementation
+// of both RsaPublicKey::EncryptRaw and RsaPrivateKey::DecryptRaw
+// (rsaEncrypt/rsaDecrypt in gotd/td's crypto/rsa.go). Distinct from
+// detail::ModPow (used by the DH math), which returns Go .Bytes()-style
+// minimal-length output instead of a fixed, padded one.
 std::vector<std::uint8_t> ModExp(const std::vector<std::uint8_t>& base, const std::vector<std::uint8_t>& exponent,
                                   const std::vector<std::uint8_t>& modulus, std::size_t fixed_len) {
-    CtxPtr ctx(BN_CTX_new(), &BN_CTX_free);
+    detail::CtxPtr ctx(BN_CTX_new(), &BN_CTX_free);
     BignumPtr b = BytesToBignum(base);
     BignumPtr e = BytesToBignum(exponent);
     BignumPtr n = BytesToBignum(modulus);
@@ -59,7 +43,7 @@ std::vector<std::uint8_t> ModExp(const std::vector<std::uint8_t>& base, const st
     if (!BN_mod_exp(result.get(), b.get(), e.get(), n.get(), ctx.get())) {
         throw std::runtime_error("BN_mod_exp failed");
     }
-    return BignumToBytes(result.get(), fixed_len);
+    return detail::BignumToFixedBytes(result.get(), fixed_len);
 }
 
 std::vector<std::uint8_t> GetBnParamBytes(EVP_PKEY* pkey, const char* param_name) {
