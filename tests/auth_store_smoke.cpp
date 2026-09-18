@@ -17,13 +17,16 @@
 #include <string>
 
 #include "shuzagram/auth/bind_temp_auth_key.hpp"
+#include "shuzagram/auth/check_password.hpp"
 #include "shuzagram/auth/sign_in.hpp"
 #include "shuzagram/domain/user_errors.hpp"
 #include "shuzagram/mtproto/crypto/bind.hpp"
+#include "shuzagram/mtproto/crypto/srp.hpp"
 #include "shuzagram/store/errors.hpp"
 #include "shuzagram/store/memory/code_store.hpp"
 #include "shuzagram/store/postgres/auth_key_store.hpp"
 #include "shuzagram/store/postgres/authorization_store.hpp"
+#include "shuzagram/store/postgres/password_store.hpp"
 #include "shuzagram/store/postgres/temp_auth_key_store.hpp"
 #include "shuzagram/store/postgres/user_store.hpp"
 
@@ -375,6 +378,72 @@ int main() {
             cleanup_signin.exec("DELETE FROM auth_keys WHERE auth_key_id = $1", pqxx::params{raw_signin_key_id});
             cleanup_signin.exec("DELETE FROM users WHERE id = $1", pqxx::params{signed_up.id});
             cleanup_signin.commit();
+        }
+
+        // auth.checkPassword / account.getPassword coverage against the
+        // real `account_passwords` table: seed a password row (the "test
+        // fixture recipe" from the SRP research -- this project doesn't
+        // implement account.updatePasswordSettings, so a real client
+        // can't set one through the RPC layer yet), then drive
+        // auth::GetPassword (rolls+persists a live SRP challenge) and
+        // auth::CheckPassword (verifies a genuine client proof) against it.
+        {
+            store::postgres::PasswordStore passwords(db);
+            const auto password = std::vector<std::uint8_t>{'h', 'u', 'n', 't', 'e', 'r', '2'};
+
+            std::vector<std::uint8_t> salt1 = {0xEC, 0xF8, 0x73, 0x76, 0x65, 0xBC, 0x77, 0x5A}; // baseSalt1
+            for (int i = 0; i < 32; ++i) salt1.push_back(static_cast<std::uint8_t>(access_hash >> (i % 8)));
+            const auto salt2 = mtproto::crypto::SrpBaseSalt2();
+
+            domain::PasswordAlgo algo;
+            algo.salt1 = salt1;
+            algo.salt2 = salt2;
+            algo.g = mtproto::crypto::kSrpBaseG;
+            algo.p = mtproto::crypto::SrpBaseP();
+
+            domain::PasswordSettings settings = auth::DefaultPasswordSettings();
+            settings.has_password = true;
+            settings.current_algo = algo;
+            settings.srp_verifier = mtproto::crypto::SrpComputeVerifier(password, salt1, salt2);
+            passwords.Save(user_id, settings);
+
+            const auto fetched_before = passwords.GetByUser(user_id);
+            Check(fetched_before.has_value() && fetched_before->has_password && fetched_before->srp_id == 0,
+                  "a directly-seeded password row round-trips through Postgres with srp_id still unassigned");
+
+            const auto rolled = auth::GetPassword(passwords, user_id);
+            Check(rolled.srp_id != 0 && !rolled.srp_b.empty() && !rolled.srp_b_secret.empty(),
+                  "auth::GetPassword rolls and persists a live SRP challenge against the real table");
+            const auto fetched_after = passwords.GetByUser(user_id);
+            Check(fetched_after.has_value() && fetched_after->srp_b == rolled.srp_b &&
+                      fetched_after->srp_id == rolled.srp_id,
+                  "the rolled challenge is genuinely persisted, not just returned in-memory");
+
+            const auto client_random = std::vector<std::uint8_t>(256, 0x09);
+            const auto proof = mtproto::crypto::SrpClientProof(password, salt1, salt2, rolled.srp_b, client_random);
+            domain::PasswordCheck check;
+            check.srp_id = rolled.srp_id;
+            check.a = proof.a;
+            check.m1 = proof.m1;
+            try {
+                auth::CheckPassword(passwords, user_id, check);
+                Check(true, "auth::CheckPassword accepts a genuine client proof against the live table");
+            } catch (const std::exception& e) {
+                Check(false, std::string("auth::CheckPassword unexpectedly threw: ") + e.what());
+            }
+
+            domain::PasswordCheck wrong_check = check;
+            wrong_check.m1.back() ^= 0x01;
+            try {
+                auth::CheckPassword(passwords, user_id, wrong_check);
+                Check(false, "a tampered M1 against the live table should throw");
+            } catch (const auth::PasswordHashInvalidError&) {
+                Check(true, "auth::CheckPassword rejects a tampered M1 against the live table");
+            }
+
+            pqxx::work cleanup_password(db.conn());
+            cleanup_password.exec("DELETE FROM account_passwords WHERE user_id = $1", pqxx::params{user_id});
+            cleanup_password.commit();
         }
 
     } catch (const std::exception& e) {

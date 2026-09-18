@@ -100,6 +100,23 @@ private:
     std::map<std::array<std::uint8_t, 8>, domain::Authorization> by_key_;
 };
 
+class FakePasswordStore final : public store::IPasswordStore {
+public:
+    std::optional<domain::PasswordSettings> GetByUser(std::int64_t user_id) override {
+        const auto it = rows_.find(user_id);
+        return it == rows_.end() ? std::nullopt : std::optional(it->second);
+    }
+    void Save(std::int64_t user_id, const domain::PasswordSettings& settings) override { rows_[user_id] = settings; }
+    void SetHasPassword(std::int64_t user_id) {
+        domain::PasswordSettings settings;
+        settings.has_password = true;
+        rows_[user_id] = settings;
+    }
+
+private:
+    std::map<std::int64_t, domain::PasswordSettings> rows_;
+};
+
 std::array<std::uint8_t, 8> MakeAuthKeyId(std::uint64_t seed) {
     std::array<std::uint8_t, 8> id{};
     std::memcpy(id.data(), &seed, 8);
@@ -233,6 +250,27 @@ void TestSignUpWithoutPriorSignInIsRejected() {
     }
 }
 
+void TestSignInWithPasswordThrowsSessionPasswordNeeded() {
+    Fixture f(8);
+    domain::User existing;
+    existing.phone = "15550008888";
+    const auto created = f.users.ForceCreate(existing);
+    FakePasswordStore passwords;
+    passwords.SetHasPassword(created.id);
+
+    const auto hash = auth::SendCode(f.users, f.codes, "+1 555 000 8888");
+    try {
+        auth::SignIn(f.users, f.authorizations, f.codes, f.auth_template, "+1 555 000 8888", hash, "12345",
+                     &passwords);
+        Check(false, "SignIn on a 2FA-protected account should throw SessionPasswordNeededError");
+    } catch (const auth::SessionPasswordNeededError&) {
+        Check(true, "SignIn throws SessionPasswordNeededError for a password-protected account");
+    }
+    const auto bound = f.authorizations.ByAuthKey(f.auth_template.auth_key_id);
+    Check(bound.has_value() && bound->user_id == created.id && bound->password_pending,
+          "SignIn still binds the authorization, with password_pending=true, before throwing");
+}
+
 } // namespace
 
 int main() {
@@ -243,6 +281,7 @@ int main() {
     TestSignInOwnerDriftIsRejected();
     TestSignUpRejectsEmptyFirstName();
     TestSignUpWithoutPriorSignInIsRejected();
+    TestSignInWithPasswordThrowsSessionPasswordNeeded();
     if (g_failures == 0) {
         std::printf("all auth::SendCode/SignIn/SignUp tests passed\n");
         return 0;

@@ -62,4 +62,80 @@ inline std::vector<std::uint8_t> ModPow(const std::vector<std::uint8_t>& base,
     return BignumToMinimalBytes(result.get());
 }
 
+// (a * b) mod modulus, (a + b) mod modulus, (a - b) mod modulus -- all as
+// minimal big-endian bytes. Used by the SRP math (srp.cpp), which mixes
+// modular add/multiply with modular exponentiation in ways ModPow alone
+// doesn't cover. BN_mod_sub already produces a result in [0, modulus),
+// even when a < b, so callers don't need Go's manual "add modulus back if
+// negative" branch (crypto/account/srp.go does that only because
+// math/big.Int.Sub can go negative; OpenSSL's BN_mod_sub never does).
+inline std::vector<std::uint8_t> MulMod(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b,
+                                         const std::vector<std::uint8_t>& modulus) {
+    CtxPtr ctx(BN_CTX_new(), &BN_CTX_free);
+    BignumPtr an = BytesToBignum(a);
+    BignumPtr bn = BytesToBignum(b);
+    BignumPtr n = BytesToBignum(modulus);
+    BignumPtr result = MakeBignum();
+    if (!BN_mod_mul(result.get(), an.get(), bn.get(), n.get(), ctx.get())) {
+        throw std::runtime_error("BN_mod_mul failed");
+    }
+    return BignumToMinimalBytes(result.get());
+}
+
+inline std::vector<std::uint8_t> AddMod(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b,
+                                         const std::vector<std::uint8_t>& modulus) {
+    CtxPtr ctx(BN_CTX_new(), &BN_CTX_free);
+    BignumPtr an = BytesToBignum(a);
+    BignumPtr bn = BytesToBignum(b);
+    BignumPtr n = BytesToBignum(modulus);
+    BignumPtr result = MakeBignum();
+    if (!BN_mod_add(result.get(), an.get(), bn.get(), n.get(), ctx.get())) {
+        throw std::runtime_error("BN_mod_add failed");
+    }
+    return BignumToMinimalBytes(result.get());
+}
+
+inline std::vector<std::uint8_t> SubMod(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b,
+                                         const std::vector<std::uint8_t>& modulus) {
+    CtxPtr ctx(BN_CTX_new(), &BN_CTX_free);
+    BignumPtr an = BytesToBignum(a);
+    BignumPtr bn = BytesToBignum(b);
+    BignumPtr n = BytesToBignum(modulus);
+    BignumPtr result = MakeBignum();
+    if (!BN_mod_sub(result.get(), an.get(), bn.get(), n.get(), ctx.get())) {
+        throw std::runtime_error("BN_mod_sub failed");
+    }
+    return BignumToMinimalBytes(result.get());
+}
+
+// Adds two plain (non-modular) non-negative bignums -- the SRP client
+// exponent `a + u*x` is a real sum used as a modexp exponent, never
+// reduced mod anything itself (BN_mod_exp accepts any nonnegative
+// exponent).
+inline std::vector<std::uint8_t> Add(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b) {
+    BignumPtr an = BytesToBignum(a);
+    BignumPtr bn = BytesToBignum(b);
+    BignumPtr result = MakeBignum();
+    if (!BN_add(result.get(), an.get(), bn.get())) throw std::runtime_error("BN_add failed");
+    return BignumToMinimalBytes(result.get());
+}
+
+inline std::vector<std::uint8_t> Mul(const std::vector<std::uint8_t>& a, const std::vector<std::uint8_t>& b) {
+    CtxPtr ctx(BN_CTX_new(), &BN_CTX_free);
+    BignumPtr an = BytesToBignum(a);
+    BignumPtr bn = BytesToBignum(b);
+    BignumPtr result = MakeBignum();
+    if (!BN_mul(result.get(), an.get(), bn.get(), ctx.get())) throw std::runtime_error("BN_mul failed");
+    return BignumToMinimalBytes(result.get());
+}
+
+// 0 < n < modulus, matching the Go source's isGoodLarge (a laxer check
+// than the SRP spec's "1 < n < p-1" -- ported exactly as-is, not
+// "improved", since the server's own validation uses this precise bound).
+inline bool IsGoodLarge(const std::vector<std::uint8_t>& n, const std::vector<std::uint8_t>& modulus) {
+    BignumPtr nn = BytesToBignum(n);
+    BignumPtr mm = BytesToBignum(modulus);
+    return !BN_is_zero(nn.get()) && !BN_is_negative(nn.get()) && BN_cmp(nn.get(), mm.get()) < 0;
+}
+
 } // namespace shuzagram::mtproto::crypto::detail

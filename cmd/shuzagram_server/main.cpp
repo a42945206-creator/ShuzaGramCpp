@@ -25,17 +25,20 @@
 #include <string>
 
 #include "shuzagram/auth/bind_temp_auth_key.hpp"
+#include "shuzagram/auth/check_password.hpp"
 #include "shuzagram/auth/sign_in.hpp"
 #include "shuzagram/mtproto/crypto/message_cipher.hpp"
 #include "shuzagram/mtproto/messages/auth.hpp"
 #include "shuzagram/mtproto/messages/bind.hpp"
 #include "shuzagram/mtproto/messages/bool.hpp"
+#include "shuzagram/mtproto/messages/password.hpp"
 #include "shuzagram/mtproto/messages/system.hpp"
 #include "shuzagram/mtproto/rpc_dispatch.hpp"
 #include "shuzagram/mtproto/tcp_handshake_server.hpp"
 #include "shuzagram/store/memory/code_store.hpp"
 #include "shuzagram/store/postgres/auth_key_store.hpp"
 #include "shuzagram/store/postgres/authorization_store.hpp"
+#include "shuzagram/store/postgres/password_store.hpp"
 #include "shuzagram/store/postgres/temp_auth_key_store.hpp"
 #include "shuzagram/store/postgres/user_store.hpp"
 
@@ -163,7 +166,9 @@ std::vector<std::uint8_t> HandleAuthSendCode(std::mutex& db_mutex, shuzagram::st
 // correctly for a session on an already-permanent key.
 std::vector<std::uint8_t> HandleAuthSignIn(std::mutex& db_mutex, shuzagram::store::IUserStore& users,
                                             shuzagram::store::IAuthorizationStore& authorizations,
-                                            shuzagram::store::ICodeStore& codes, shuzagram::mtproto::TLBuffer& body,
+                                            shuzagram::store::ICodeStore& codes,
+                                            shuzagram::store::IPasswordStore& passwords,
+                                            shuzagram::mtproto::TLBuffer& body,
                                             const shuzagram::mtproto::RpcContext& ctx) {
     using namespace shuzagram;
 
@@ -178,7 +183,7 @@ std::vector<std::uint8_t> HandleAuthSignIn(std::mutex& db_mutex, shuzagram::stor
         {
             std::lock_guard<std::mutex> lock(db_mutex);
             result = auth::SignIn(users, authorizations, codes, auth_template, req.phone_number, req.phone_code_hash,
-                                   req.phone_code);
+                                   req.phone_code, &passwords);
         }
         mtproto::TLBuffer out;
         if (result.need_sign_up) {
@@ -190,6 +195,11 @@ std::vector<std::uint8_t> HandleAuthSignIn(std::mutex& db_mutex, shuzagram::stor
             resp.Encode(out);
         }
         return out.buf;
+    } catch (const auth::SessionPasswordNeededError&) {
+        // The authorization is already bound (password_pending=true) --
+        // see that error's own doc comment. auth.checkPassword completes
+        // the login from here.
+        return EncodeRpcError(401, "SESSION_PASSWORD_NEEDED");
     } catch (const auth::CodeExpiredError&) {
         return EncodeRpcError(400, "PHONE_CODE_EXPIRED");
     } catch (const auth::CodeInvalidError&) {
@@ -251,6 +261,80 @@ std::vector<std::uint8_t> HandleAuthSignUp(std::mutex& db_mutex, shuzagram::stor
     }
 }
 
+// account.getPassword. Works even before/without a bound authorization
+// (defaultPasswordSettings(), has_password=false) -- a session mid-login
+// (e.g. right after SESSION_PASSWORD_NEEDED) still needs to call this to
+// learn the salts/srp_B to build its auth.checkPassword proof against.
+std::vector<std::uint8_t> HandleAccountGetPassword(std::mutex& db_mutex,
+                                                    shuzagram::store::IAuthorizationStore& authorizations,
+                                                    shuzagram::store::IPasswordStore& passwords,
+                                                    shuzagram::mtproto::TLBuffer& body,
+                                                    const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    mtproto::messages::AccountGetPasswordRequest req;
+    req.DecodeBare(body);
+
+    try {
+        std::lock_guard<std::mutex> lock(db_mutex);
+        const auto authz = authorizations.ByAuthKey(ctx.auth_key_id);
+        const domain::PasswordSettings settings = (authz && authz->user_id != 0)
+                                                       ? auth::GetPassword(passwords, authz->user_id)
+                                                       : auth::DefaultPasswordSettings();
+
+        mtproto::messages::AccountPassword resp;
+        resp.settings = settings;
+        mtproto::TLBuffer out;
+        resp.Encode(out);
+        return out.buf;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "account.getPassword internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
+// auth.checkPassword. Also completes a pending SESSION_PASSWORD_NEEDED
+// login (MarkPasswordPassed), exactly like the Go source's
+// onAuthCheckPassword.
+std::vector<std::uint8_t> HandleAuthCheckPassword(std::mutex& db_mutex, shuzagram::store::IUserStore& users,
+                                                   shuzagram::store::IAuthorizationStore& authorizations,
+                                                   shuzagram::store::IPasswordStore& passwords,
+                                                   shuzagram::mtproto::TLBuffer& body,
+                                                   const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    mtproto::messages::AuthCheckPasswordRequest req;
+    req.DecodeBare(body);
+
+    try {
+        std::lock_guard<std::mutex> lock(db_mutex);
+        const auto authz = authorizations.ByAuthKey(ctx.auth_key_id);
+        if (!authz || authz->user_id == 0) return EncodeRpcError(400, "PASSWORD_HASH_INVALID");
+
+        auth::CheckPassword(passwords, authz->user_id, req.check);
+
+        if (authz->password_pending) {
+            authorizations.MarkPasswordPassed(ctx.auth_key_id, authz->user_id);
+        }
+
+        const auto user = users.ByID(authz->user_id);
+        mtproto::messages::AuthAuthorization resp;
+        if (user) resp.user = *user;
+        mtproto::TLBuffer out;
+        resp.Encode(out);
+        return out.buf;
+    } catch (const auth::PasswordHashInvalidError&) {
+        return EncodeRpcError(400, "PASSWORD_HASH_INVALID");
+    } catch (const auth::SrpIdInvalidError&) {
+        return EncodeRpcError(400, "SRP_ID_INVALID");
+    } catch (const auth::SrpPasswordChangedError&) {
+        return EncodeRpcError(400, "SRP_PASSWORD_CHANGED");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "auth.checkPassword internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -278,6 +362,7 @@ int main() {
     std::unique_ptr<store::postgres::TempAuthKeyBindingStore> temp_key_store;
     std::unique_ptr<store::postgres::UserStore> user_store;
     std::unique_ptr<store::postgres::AuthorizationStore> authorization_store;
+    std::unique_ptr<store::postgres::PasswordStore> password_store;
     store::memory::CodeStore code_store; // see its own doc comment: real, not just a test double
     if (!pg_dsn.empty()) {
         try {
@@ -286,6 +371,7 @@ int main() {
             temp_key_store = std::make_unique<store::postgres::TempAuthKeyBindingStore>(*db);
             user_store = std::make_unique<store::postgres::UserStore>(*db);
             authorization_store = std::make_unique<store::postgres::AuthorizationStore>(*db);
+            password_store = std::make_unique<store::postgres::PasswordStore>(*db);
             std::printf("connected to Postgres; completed handshakes will persist their auth_key\n");
         } catch (const std::exception& e) {
             std::fprintf(stderr, "failed to connect to Postgres (%s): %s -- continuing without persistence\n",
@@ -304,7 +390,7 @@ int main() {
                                });
         std::printf("auth.bindTempAuthKey is wired up\n");
     }
-    if (user_store && authorization_store) {
+    if (user_store && authorization_store && password_store) {
         rpc_registry.Register(mtproto::messages::AuthSendCodeRequest::kTypeId,
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext&) {
                                    return HandleAuthSendCode(db_mutex, *user_store, code_store, body);
@@ -312,14 +398,25 @@ int main() {
         rpc_registry.Register(mtproto::messages::AuthSignInRequest::kTypeId,
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
                                    return HandleAuthSignIn(db_mutex, *user_store, *authorization_store, code_store,
-                                                            body, ctx);
+                                                            *password_store, body, ctx);
                                });
         rpc_registry.Register(mtproto::messages::AuthSignUpRequest::kTypeId,
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
                                    return HandleAuthSignUp(db_mutex, *user_store, *authorization_store, code_store,
                                                             body, ctx);
                                });
-        std::printf("auth.sendCode/auth.signIn/auth.signUp are wired up (dev fixed code only)\n");
+        rpc_registry.Register(mtproto::messages::AccountGetPasswordRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAccountGetPassword(db_mutex, *authorization_store, *password_store,
+                                                                    body, ctx);
+                               });
+        rpc_registry.Register(mtproto::messages::AuthCheckPasswordRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAuthCheckPassword(db_mutex, *user_store, *authorization_store,
+                                                                   *password_store, body, ctx);
+                               });
+        std::printf("auth.sendCode/auth.signIn/auth.signUp/account.getPassword/auth.checkPassword are wired up "
+                    "(dev fixed code only)\n");
     }
 
     mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key),

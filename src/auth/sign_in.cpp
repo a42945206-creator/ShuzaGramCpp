@@ -114,14 +114,25 @@ std::string SendCode(store::IUserStore& users, store::ICodeStore& codes, const s
 
 SignInResult SignIn(store::IUserStore& users, store::IAuthorizationStore& authorizations, store::ICodeStore& codes,
                      const domain::Authorization& auth_template, const std::string& phone_number,
-                     const std::string& phone_code_hash, const std::string& phone_code) {
+                     const std::string& phone_code_hash, const std::string& phone_code,
+                     store::IPasswordStore* passwords) {
     const std::string phone = domain::NormalizePhone(phone_number);
     const VerifiedLogin verified = VerifyLoginCode(users, codes, phone, phone_code_hash, phone_code);
     if (!verified.found) return {true, {}};
 
+    // passwordNeeded in the Go source: false whenever there's no
+    // PasswordStore at all, else whatever the persisted settings say.
+    bool password_needed = false;
+    if (passwords) {
+        const auto settings = passwords->GetByUser(verified.user.id);
+        password_needed = settings.has_value() && settings->has_password;
+    }
+
     domain::Authorization a = auth_template;
     a.user_id = verified.user.id;
+    a.password_pending = password_needed;
     authorizations.Bind(a);
+    if (password_needed) throw SessionPasswordNeededError();
     return {false, verified.user};
 }
 
