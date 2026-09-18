@@ -16,3 +16,11 @@ find_package(Threads REQUIRED)
 add_executable(mtproto_handshake_test mtproto_handshake_test.cpp)
 target_link_libraries(mtproto_handshake_test PRIVATE shuzagram_mtproto Threads::Threads)
 add_test(NAME mtproto_handshake_test COMMAND mtproto_handshake_test)
+
+add_executable(mtproto_transport_test mtproto_transport_test.cpp)
+target_link_libraries(mtproto_transport_test PRIVATE shuzagram_mtproto)
+add_test(NAME mtproto_transport_test COMMAND mtproto_transport_test)
+
+add_executable(mtproto_integration_test mtproto_integration_test.cpp)
+target_link_libraries(mtproto_integration_test PRIVATE shuzagram_mtproto Threads::Threads)
+add_test(NAME mtproto_integration_test COMMAND mtproto_integration_test)
