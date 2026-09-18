@@ -28,3 +28,10 @@ add_test(NAME mtproto_integration_test COMMAND mtproto_integration_test)
 add_executable(mtproto_message_cipher_test mtproto_message_cipher_test.cpp)
 target_link_libraries(mtproto_message_cipher_test PRIVATE shuzagram_mtproto)
 add_test(NAME mtproto_message_cipher_test COMMAND mtproto_message_cipher_test)
+
+add_executable(net_tcp_handshake_test net_tcp_handshake_test.cpp)
+target_link_libraries(net_tcp_handshake_test PRIVATE shuzagram_mtproto Threads::Threads)
+add_test(NAME net_tcp_handshake_test COMMAND net_tcp_handshake_test)
+
+add_executable(manual_tcp_client_smoke manual_tcp_client_smoke.cpp)
+target_link_libraries(manual_tcp_client_smoke PRIVATE shuzagram_mtproto)

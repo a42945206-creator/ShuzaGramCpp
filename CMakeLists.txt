@@ -47,10 +47,15 @@ add_library(shuzagram_mtproto
   src/mtproto/server_exchange.cpp
   src/mtproto/transport/full_codec.cpp
   src/mtproto/crypto/message_cipher.cpp
+  src/net/tcp_socket.cpp
+  src/net/tcp_listener.cpp
+  src/mtproto/tcp_handshake_server.cpp
 )
 target_include_directories(shuzagram_mtproto PUBLIC include)
-target_link_libraries(shuzagram_mtproto PUBLIC OpenSSL::Crypto)
+find_package(Threads REQUIRED)
+target_link_libraries(shuzagram_mtproto PUBLIC OpenSSL::Crypto Threads::Threads)
 target_compile_options(shuzagram_mtproto PRIVATE -Wall -Wextra)
 
 enable_testing()
 add_subdirectory(tests)
+add_subdirectory(cmd/shuzagram_server)
