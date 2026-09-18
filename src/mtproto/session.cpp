@@ -61,7 +61,8 @@ std::vector<std::uint8_t> MtprotoSession::DispatchOne(std::int64_t msg_id, const
     if (registry_) {
         if (const RpcHandler* handler = registry_->Find(id)) {
             b.ConsumeID(id);
-            result = (*handler)(id, b);
+            const RpcContext ctx{crypto::AuthKeyId(auth_key_), session_id_};
+            result = (*handler)(id, b, ctx);
         }
     }
     if (result.empty()) {

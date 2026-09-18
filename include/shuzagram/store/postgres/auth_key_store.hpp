@@ -7,7 +7,7 @@ namespace shuzagram::store::postgres {
 
 // PostgreSQL implementation of store::IAuthKeyStore, ported from
 // internal/store/postgres/authkey.go against the live `auth_keys` table.
-// See that header for what's deferred to the temp-auth-key-binding slice.
+// See store::IAuthKeyStore for what's still deferred (orphan-key GC).
 class AuthKeyStore final : public store::IAuthKeyStore {
 public:
     explicit AuthKeyStore(Database& db) : db_(db) {}
@@ -16,6 +16,9 @@ public:
     std::optional<store::AuthKeyData> Get(const std::array<std::uint8_t, 8>& id) override;
     void UpdateClientInfo(const std::array<std::uint8_t, 8>& id, const store::AuthKeyClientInfo& info) override;
     void Delete(const std::array<std::uint8_t, 8>& id) override;
+    std::optional<store::AuthKeyData> Revalidate(const std::array<std::uint8_t, 8>& id) override;
+    store::AuthKeyBindingKeys LoadBindingKeys(const std::array<std::uint8_t, 8>& temp_id,
+                                               const std::array<std::uint8_t, 8>& perm_id) override;
 
 private:
     Database& db_;

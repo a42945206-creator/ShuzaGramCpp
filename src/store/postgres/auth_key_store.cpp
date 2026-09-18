@@ -1,13 +1,13 @@
 #include "shuzagram/store/postgres/auth_key_store.hpp"
 
 #include <cstring>
+#include <string>
 
 #include "auth_identity_lock.hpp"
 #include "auth_key_codec.hpp"
 
-// Ported from internal/store/postgres/authkey.go. Only Save/Get/
-// UpdateClientInfo/Delete are implemented -- see the interface header for
-// what's deferred.
+// Ported from internal/store/postgres/authkey.go -- see the interface
+// header for what's deferred (TouchActiveRawAuthKeys/DeleteOrphaned).
 namespace shuzagram::store::postgres {
 
 namespace {
@@ -71,6 +71,51 @@ std::optional<AuthKeyData> AuthKeyStore::Get(const std::array<std::uint8_t, 8>& 
     tx.commit();
     if (result.empty()) return std::nullopt;
     return RowToAuthKeyData(result[0]);
+}
+
+std::optional<AuthKeyData> AuthKeyStore::Revalidate(const std::array<std::uint8_t, 8>& id) {
+    pqxx::work tx(db_.conn());
+    const auto result =
+        tx.exec(std::string("SELECT ") + kAuthKeyProjectionColumns + " FROM auth_keys WHERE auth_key_id = $1",
+                pqxx::params{AuthKeyIDToInt64(id)});
+    tx.commit();
+    if (result.empty()) return std::nullopt;
+    return RowToAuthKeyData(result[0]);
+}
+
+// See LoadBindingKeys in internal/store/postgres/authkey.go: touches and
+// returns both cryptographic proof keys in one statement, so orphan GC
+// can't split validation across two independently-expiring leases.
+AuthKeyBindingKeys AuthKeyStore::LoadBindingKeys(const std::array<std::uint8_t, 8>& temp_id,
+                                                  const std::array<std::uint8_t, 8>& perm_id) {
+    const std::int64_t temp_int = AuthKeyIDToInt64(temp_id);
+    const std::int64_t perm_int = AuthKeyIDToInt64(perm_id);
+    pqxx::work tx(db_.conn());
+    const auto result = tx.exec(
+        std::string("UPDATE auth_keys SET last_used_at = now() WHERE auth_key_id = ANY($1::bigint[]) RETURNING ") +
+            kAuthKeyProjectionColumns,
+        pqxx::params{"{" + std::to_string(temp_int) + "," + std::to_string(perm_int) + "}"});
+    tx.commit();
+
+    AuthKeyBindingKeys out;
+    for (const auto& row : result) {
+        AuthKeyData data = RowToAuthKeyData(row);
+        const std::int64_t row_id = AuthKeyIDToInt64(data.id);
+        if (row_id == temp_int) {
+            out.temporary = data;
+            out.temporary_found = true;
+        } else if (row_id == perm_int) {
+            out.permanent = data;
+            out.permanent_found = true;
+        } else {
+            throw store::Error("load auth key binding pair returned unexpected id");
+        }
+    }
+    if (temp_id == perm_id && out.temporary_found) {
+        out.permanent = out.temporary;
+        out.permanent_found = true;
+    }
+    return out;
 }
 
 void AuthKeyStore::UpdateClientInfo(const std::array<std::uint8_t, 8>& id, const AuthKeyClientInfo& info) {

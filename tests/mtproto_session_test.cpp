@@ -117,7 +117,7 @@ void TestRegisteredHandlerIsUsed() {
     constexpr std::uint32_t kDemoMethodId = 0x12345678;
 
     RpcHandlerRegistry registry;
-    registry.Register(kDemoMethodId, [](std::uint32_t, TLBuffer& body) -> std::vector<std::uint8_t> {
+    registry.Register(kDemoMethodId, [](std::uint32_t, TLBuffer& body, const RpcContext&) -> std::vector<std::uint8_t> {
         const std::int32_t echoed_field = body.Int32();
         // A trivial demo "response" object: reuse Pong's shape purely as a
         // convenient pre-existing encodable type, msg_id=0 since it's not

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
@@ -8,14 +9,28 @@
 #include "shuzagram/mtproto/tl_buffer.hpp"
 
 // A handler receives the constructor id it was registered under (so one
-// handler function can serve several related methods if useful) and a
-// TLBuffer positioned right after that id, holding exactly that method's
-// own fields. It returns the complete pre-encoded response object (with
-// its own leading type id) -- rpc_dispatch.cpp wraps it in rpc_result, the
-// handler never needs to know it's inside one.
+// handler function can serve several related methods if useful), a
+// TLBuffer positioned right after that id holding exactly that method's own
+// fields, and the calling session's RpcContext. It returns the complete
+// pre-encoded response object (with its own leading type id) --
+// rpc_dispatch.cpp wraps it in rpc_result, the handler never needs to know
+// it's inside one.
 namespace shuzagram::mtproto {
 
-using RpcHandler = std::function<std::vector<std::uint8_t>(std::uint32_t constructor_id, TLBuffer& body)>;
+// The per-call context every real MTProto RPC method needs and none of
+// ping/msgs_ack/msg_container do: which auth_key decrypted this request,
+// and which session (within that auth_key) it arrived on. Mirrors what
+// Go's Router pulls out of ctx via AuthKeyIDFrom/SessionIDFrom
+// (internal/rpc/router.go) -- deliberately just these two fields for now,
+// since auth.bindTempAuthKey (the first handler that actually needs
+// context) is the only caller so far; extend as more methods need more.
+struct RpcContext {
+    std::array<std::uint8_t, 8> auth_key_id{};
+    std::int64_t session_id = 0;
+};
+
+using RpcHandler =
+    std::function<std::vector<std::uint8_t>(std::uint32_t constructor_id, TLBuffer& body, const RpcContext& ctx)>;
 
 // A minimal method registry. Real Telegram has thousands of RPC methods
 // (the `tg` package in gotd/td); this project implements none of them as

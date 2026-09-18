@@ -66,4 +66,13 @@ public:
     AuthKeySessionLayerConflictError() : Error("conflicting auth key session layer evidence") {}
 };
 
+// A temporary auth key has already been bound to a DIFFERENT permanent key
+// than the one this call is trying to bind it to. Re-binding to the SAME
+// permanent key is idempotent and does not throw this (see
+// telesrv_bind_temp_auth_key's ON CONFLICT ... WHERE clause).
+class TempAuthKeyAlreadyBoundError : public Error {
+public:
+    TempAuthKeyAlreadyBoundError() : Error("temporary auth key already bound to a different permanent key") {}
+};
+
 } // namespace shuzagram::store

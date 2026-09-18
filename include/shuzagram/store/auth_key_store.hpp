@@ -7,11 +7,10 @@
 #include "shuzagram/store/auth_key.hpp"
 
 // Port of the store.AuthKeyStore interface (internal/store/authkey.go).
-// Save/Get/UpdateClientInfo/Delete are implemented against Postgres in this
-// slice. Revalidate, LoadBindingKeys, TouchActiveRawAuthKeys and
-// DeleteOrphaned are deferred to the temp-auth-key-binding slice: they only
-// matter once auth.bindTempAuthKey and the orphan-key GC sweep exist to call
-// them, and porting them without a caller to exercise them would be
+// Save/Get/UpdateClientInfo/Delete/Revalidate/LoadBindingKeys are
+// implemented against Postgres. TouchActiveRawAuthKeys and DeleteOrphaned
+// (the orphan-key GC sweep) remain deferred: nothing in this project calls
+// them yet, and porting them without a caller to exercise them would be
 // unverifiable.
 namespace shuzagram::store {
 
@@ -38,6 +37,22 @@ public:
     // destroy_auth_key. Not-found is a silent success. The session-manager /
     // control fabric is responsible for fencing the active connection.
     virtual void Delete(const std::array<std::uint8_t, 8>& id) = 0;
+
+    // Plain read, WITHOUT touching the orphan-activity lease -- used only to
+    // re-classify an already-failed auth.bindTempAuthKey attempt (was the
+    // temp key simply gone/expired, or was the proof itself bad?). Never
+    // use this for the initial lookup that gates whether a key may still be
+    // used; Get is the one that keeps a live key's lease current.
+    virtual std::optional<AuthKeyData> Revalidate(const std::array<std::uint8_t, 8>& id) = 0;
+
+    // Loads and activity-touches both cryptographic proof keys named by one
+    // auth.bindTempAuthKey call in a single statement, so orphan GC can
+    // never split proof validation across two independently-expiring
+    // leases. Missing rows stay explicit in the result (found flags) rather
+    // than throwing, since "which key was missing" changes which public RPC
+    // error the caller returns.
+    virtual AuthKeyBindingKeys LoadBindingKeys(const std::array<std::uint8_t, 8>& temp_id,
+                                                const std::array<std::uint8_t, 8>& perm_id) = 0;
 };
 
 } // namespace shuzagram::store

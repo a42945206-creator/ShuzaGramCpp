@@ -21,11 +21,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <string>
 
+#include "shuzagram/auth/bind_temp_auth_key.hpp"
 #include "shuzagram/mtproto/crypto/message_cipher.hpp"
+#include "shuzagram/mtproto/messages/bind.hpp"
+#include "shuzagram/mtproto/messages/bool.hpp"
+#include "shuzagram/mtproto/messages/system.hpp"
+#include "shuzagram/mtproto/rpc_dispatch.hpp"
 #include "shuzagram/mtproto/tcp_handshake_server.hpp"
 #include "shuzagram/store/postgres/auth_key_store.hpp"
+#include "shuzagram/store/postgres/temp_auth_key_store.hpp"
 
 namespace {
 
@@ -53,6 +60,66 @@ std::string HexEncode(const std::uint8_t* data, std::size_t len) {
     return out;
 }
 
+std::vector<std::uint8_t> EncodeRpcError(int code, const std::string& message) {
+    shuzagram::mtproto::messages::RpcError error;
+    error.error_code = code;
+    error.error_message = message;
+    shuzagram::mtproto::TLBuffer out;
+    error.Encode(out);
+    return out.buf;
+}
+
+// auth.bindTempAuthKey handler. Registered only when Postgres is connected
+// (auth_key_store/temp_key_store both need a live database); with no
+// database this method falls through to the registry's usual
+// METHOD_NOT_FOUND, same as every other unimplemented RPC method.
+//
+// db_mutex serializes every Postgres-touching operation this process
+// performs (this and the handshake-completion Save() below): the store
+// layer holds a single pqxx::connection (see store::postgres::Database's
+// own doc comment -- a real connection pool is explicitly deferred), and
+// pqxx::connection is not safe for concurrent use from the several
+// per-connection worker threads TcpHandshakeServer::Run spawns. This trades
+// away cross-connection DB concurrency for correctness; revisit once
+// Database pools connections instead of holding just one.
+std::vector<std::uint8_t> HandleAuthBindTempAuthKey(std::mutex& db_mutex, shuzagram::store::IAuthKeyStore& auth_keys,
+                                                     shuzagram::store::ITempAuthKeyBindingStore& temp_keys,
+                                                     shuzagram::mtproto::TLBuffer& body,
+                                                     const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    mtproto::messages::AuthBindTempAuthKeyRequest req;
+    req.DecodeBare(body);
+
+    auth::BindTempAuthKeyRequest bind_req;
+    bind_req.temp_auth_key_id = ctx.auth_key_id;
+    bind_req.temp_session_id = ctx.session_id;
+    bind_req.perm_auth_key_id = req.perm_auth_key_id;
+    bind_req.nonce = req.nonce;
+    bind_req.expires_at = req.expires_at;
+    bind_req.encrypted_message = std::move(req.encrypted_message);
+
+    try {
+        std::lock_guard<std::mutex> lock(db_mutex);
+        auth::BindTempAuthKey(auth_keys, temp_keys, bind_req);
+    } catch (const auth::ExpiresAtInvalidError&) {
+        return EncodeRpcError(400, "EXPIRES_AT_INVALID");
+    } catch (const auth::TempAuthKeyEmptyError&) {
+        return EncodeRpcError(400, "TEMP_AUTH_KEY_EMPTY");
+    } catch (const auth::EncryptedMessageInvalidError&) {
+        return EncodeRpcError(400, "ENCRYPTED_MESSAGE_INVALID");
+    } catch (const store::TempAuthKeyAlreadyBoundError&) {
+        return EncodeRpcError(400, "TEMP_AUTH_KEY_ALREADY_BOUND");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "auth.bindTempAuthKey internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+
+    mtproto::TLBuffer out;
+    mtproto::messages::EncodeBool(out, true);
+    return out.buf;
+}
+
 } // namespace
 
 int main() {
@@ -74,12 +141,15 @@ int main() {
     std::printf("RSA key ready (%s), fingerprint=%llx\n", rsa_key_path.c_str(),
                 static_cast<unsigned long long>(key.Fingerprint()));
 
+    std::mutex db_mutex; // see HandleAuthBindTempAuthKey's doc comment
     std::unique_ptr<store::postgres::Database> db;
     std::unique_ptr<store::postgres::AuthKeyStore> auth_key_store;
+    std::unique_ptr<store::postgres::TempAuthKeyBindingStore> temp_key_store;
     if (!pg_dsn.empty()) {
         try {
             db = std::make_unique<store::postgres::Database>(pg_dsn);
             auth_key_store = std::make_unique<store::postgres::AuthKeyStore>(*db);
+            temp_key_store = std::make_unique<store::postgres::TempAuthKeyBindingStore>(*db);
             std::printf("connected to Postgres; completed handshakes will persist their auth_key\n");
         } catch (const std::exception& e) {
             std::fprintf(stderr, "failed to connect to Postgres (%s): %s -- continuing without persistence\n",
@@ -89,7 +159,18 @@ int main() {
         std::printf("SHUZAGRAM_PG_DSN not set -- completed handshakes will be logged but not persisted\n");
     }
 
-    mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key));
+    mtproto::RpcHandlerRegistry rpc_registry;
+    if (auth_key_store && temp_key_store) {
+        rpc_registry.Register(mtproto::messages::AuthBindTempAuthKeyRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAuthBindTempAuthKey(db_mutex, *auth_key_store, *temp_key_store, body,
+                                                                     ctx);
+                               });
+        std::printf("auth.bindTempAuthKey is wired up\n");
+    }
+
+    mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key),
+                                        &rpc_registry);
     std::printf("listening on %s:%d\n", bind_address.c_str(), server.Port());
 
     g_server.store(&server);
@@ -108,7 +189,8 @@ int main() {
                 data.id = auth_key_id;
                 data.value = result.auth_key;
                 data.server_salt = result.server_salt;
-                data.expires_at = 0; // permanent key
+                data.expires_at = result.expires_at; // 0 = permanent, >0 = temporary (PFS) key
+                std::lock_guard<std::mutex> lock(db_mutex);
                 auth_key_store->Save(data);
                 std::printf("  saved to Postgres\n");
             } catch (const std::exception& e) {

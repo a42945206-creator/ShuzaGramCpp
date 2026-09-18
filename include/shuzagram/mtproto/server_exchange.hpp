@@ -34,6 +34,14 @@ private:
 struct ServerExchangeResult {
     std::array<std::uint8_t, 256> auth_key{};
     std::int64_t server_salt = 0;
+    // 0 for a permanent key (p_q_inner_data / p_q_inner_data_dc). For a PFS
+    // temporary key (p_q_inner_data_temp_dc), the protocol expiry the client
+    // requested: server_time-of-handshake + expires_in, matching
+    // internal/mtprotoedge/exchange_compat.go's identical formula. The
+    // caller (this project's store::AuthKeyData::expires_at) must persist
+    // this as-is -- auth.bindTempAuthKey later needs to find exactly this
+    // value unchanged to validate its own expires_at field against it.
+    int expires_at = 0;
 };
 
 // The server never generates its own pq/dh_prime randomly: this project

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <limits>
 
 #include "crypto/bignum_util.hpp"
 #include "shuzagram/mtproto/crypto/dh.hpp"
@@ -184,6 +185,29 @@ ServerExchangeResult ServerExchange::Run(const ReadFrame& read, const WriteFrame
         throw ServerExchangeError(kCodeAuthKeyNotFound, std::string("decode req_DH_params: ") + e.what());
     }
 
+    // p_q_inner_data_temp_dc's expires_in is the ONLY signal that decides
+    // whether the resulting auth_key is temporary (PFS) or permanent; a
+    // non-positive value would silently turn a temp-key request into a
+    // permanent key, so it's rejected instead. Matches
+    // internal/mtprotoedge/exchange_compat.go's validatePQInnerData.
+    if (inner.kind == PqInnerDataKind::kTempDc && inner.expires_in <= 0) {
+        throw ServerExchangeError(kCodeAuthKeyNotFound, "p_q_inner_data temporary key expires_in must be positive");
+    }
+    const auto handshake_time = std::chrono::system_clock::now();
+    std::int64_t auth_key_expires_at = 0;
+    if (inner.kind == PqInnerDataKind::kTempDc) {
+        const std::int64_t now =
+            std::chrono::duration_cast<std::chrono::seconds>(handshake_time.time_since_epoch()).count();
+        auth_key_expires_at = now + static_cast<std::int64_t>(inner.expires_in);
+        // TL timestamps are signed int32 on the wire -- reject an impossible
+        // lifetime instead of silently wrapping a temporary key into what
+        // would be read back as a permanent one (expires_at <= 0) or an
+        // out-of-range one.
+        if (auth_key_expires_at <= 0 || auth_key_expires_at > std::numeric_limits<std::int32_t>::max()) {
+            throw ServerExchangeError(kCodeAuthKeyNotFound, "temporary auth key expiry is out of int32 range");
+        }
+    }
+
     // 4/5. Generate g_a (the real per-connection secret) and send
     // Server_DH_Params encrypted under TempAesKeys(new_nonce, server_nonce).
     const std::vector<std::uint8_t> dh_prime = FixedDhPrime();
@@ -244,6 +268,7 @@ ServerExchangeResult ServerExchange::Run(const ReadFrame& read, const WriteFrame
     const std::vector<std::uint8_t> auth_key_bytes = crypto::ModPowFixed(client_inner.g_b, a, dh_prime, 256);
     std::copy(auth_key_bytes.begin(), auth_key_bytes.end(), result.auth_key.begin());
     result.server_salt = crypto::ServerSalt(inner.new_nonce, server_nonce);
+    result.expires_at = static_cast<int>(auth_key_expires_at);
 
     // 8. dh_gen_ok proves both sides derived the same auth_key.
     {

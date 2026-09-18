@@ -6,7 +6,7 @@ add_executable(user_store_smoke user_store_smoke.cpp)
 target_link_libraries(user_store_smoke PRIVATE shuzagram_store_postgres)
 
 add_executable(auth_store_smoke auth_store_smoke.cpp)
-target_link_libraries(auth_store_smoke PRIVATE shuzagram_store_postgres)
+target_link_libraries(auth_store_smoke PRIVATE shuzagram_store_postgres shuzagram_mtproto shuzagram_auth)
 
 add_executable(mtproto_crypto_test mtproto_crypto_test.cpp)
 target_link_libraries(mtproto_crypto_test PRIVATE shuzagram_mtproto)
@@ -43,3 +43,11 @@ target_link_libraries(manual_tcp_client_smoke PRIVATE shuzagram_mtproto)
 add_executable(mtproto_session_test mtproto_session_test.cpp)
 target_link_libraries(mtproto_session_test PRIVATE shuzagram_mtproto)
 add_test(NAME mtproto_session_test COMMAND mtproto_session_test)
+
+add_executable(mtproto_bind_test mtproto_bind_test.cpp)
+target_link_libraries(mtproto_bind_test PRIVATE shuzagram_mtproto)
+add_test(NAME mtproto_bind_test COMMAND mtproto_bind_test)
+
+add_executable(auth_bind_temp_auth_key_test auth_bind_temp_auth_key_test.cpp)
+target_link_libraries(auth_bind_temp_auth_key_test PRIVATE shuzagram_auth)
+add_test(NAME auth_bind_temp_auth_key_test COMMAND auth_bind_temp_auth_key_test)

@@ -32,6 +32,7 @@ add_library(shuzagram_store_postgres
   src/store/postgres/user_lock.cpp
   src/store/postgres/auth_key_store.cpp
   src/store/postgres/authorization_store.cpp
+  src/store/postgres/temp_auth_key_store.cpp
 )
 target_include_directories(shuzagram_store_postgres PUBLIC include)
 target_link_libraries(shuzagram_store_postgres PUBLIC shuzagram_domain PkgConfig::LIBPQXX
@@ -47,6 +48,8 @@ add_library(shuzagram_mtproto
   src/mtproto/server_exchange.cpp
   src/mtproto/transport/full_codec.cpp
   src/mtproto/crypto/message_cipher.cpp
+  src/mtproto/crypto/kdf_v1.cpp
+  src/mtproto/crypto/bind.cpp
   src/net/tcp_socket.cpp
   src/net/tcp_listener.cpp
   src/mtproto/tcp_handshake_server.cpp
@@ -56,6 +59,17 @@ target_include_directories(shuzagram_mtproto PUBLIC include)
 find_package(Threads REQUIRED)
 target_link_libraries(shuzagram_mtproto PUBLIC OpenSSL::Crypto Threads::Threads)
 target_compile_options(shuzagram_mtproto PRIVATE -Wall -Wextra)
+
+# The auth.bindTempAuthKey business logic: the one piece that needs both
+# crypto (shuzagram_mtproto) and the store interfaces (header-only; a
+# concrete implementation, e.g. shuzagram_store_postgres, is linked in by
+# whichever executable actually wires this up).
+add_library(shuzagram_auth
+  src/auth/bind_temp_auth_key.cpp
+)
+target_include_directories(shuzagram_auth PUBLIC include)
+target_link_libraries(shuzagram_auth PUBLIC shuzagram_mtproto)
+target_compile_options(shuzagram_auth PRIVATE -Wall -Wextra)
 
 enable_testing()
 add_subdirectory(tests)

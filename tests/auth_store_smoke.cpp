@@ -16,10 +16,13 @@
 #include <cstring>
 #include <string>
 
+#include "shuzagram/auth/bind_temp_auth_key.hpp"
 #include "shuzagram/domain/user_errors.hpp"
+#include "shuzagram/mtproto/crypto/bind.hpp"
 #include "shuzagram/store/errors.hpp"
 #include "shuzagram/store/postgres/auth_key_store.hpp"
 #include "shuzagram/store/postgres/authorization_store.hpp"
+#include "shuzagram/store/postgres/temp_auth_key_store.hpp"
 #include "shuzagram/store/postgres/user_store.hpp"
 
 namespace {
@@ -231,6 +234,88 @@ int main() {
         Check(revoked.has_value() && revoked->user_id == user_id, "RevokeByHash removes the authorization row");
         Check(!authorizations.ByAuthKey(key_id).has_value(), "authorization row is gone after RevokeByHash");
         Check(auth_keys.Get(key_id).has_value(), "the protocol key itself survives RevokeByHash");
+
+        // auth.bindTempAuthKey coverage: LoadBindingKeys, the atomic
+        // Postgres `telesrv_bind_temp_auth_key` function via
+        // TempAuthKeyBindingStore, and the auth::BindTempAuthKey
+        // business-logic layer on top of both -- against the SAME live
+        // schema the real ShuzaGram deployment's Go binary uses (this
+        // reuses that already-deployed database function rather than
+        // reimplementing its identity-lock-respecting logic in C++). key_id
+        // (still a live permanent key at this point) plays the permanent
+        // key here.
+        {
+            store::postgres::TempAuthKeyBindingStore temp_keys(db);
+
+            const auto temp_id = MakeAuthKeyID(access_hash + 3);
+            std::int64_t raw_temp_id;
+            std::memcpy(&raw_temp_id, temp_id.data(), 8);
+            const int expires_at =
+                static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+                                      std::chrono::system_clock::now().time_since_epoch())
+                                      .count()) +
+                3600;
+            store::AuthKeyData temp_key;
+            temp_key.id = temp_id;
+            temp_key.value.fill(0x44);
+            temp_key.expires_at = expires_at;
+            auth_keys.Save(temp_key);
+
+            const auto pair = auth_keys.LoadBindingKeys(temp_id, key_id);
+            Check(pair.temporary_found && pair.temporary.expires_at == expires_at && pair.permanent_found &&
+                      pair.permanent.expires_at == 0,
+                  "LoadBindingKeys returns both rows with their real expiry");
+
+            mtproto::messages::BindAuthKeyInner inner;
+            inner.nonce = 0x0102030405060708;
+            inner.temp_auth_key_id = raw_temp_id;
+            inner.perm_auth_key_id = raw_key_id;
+            inner.temp_session_id = 999;
+            inner.expires_at = expires_at;
+            const auto encrypted = mtproto::crypto::EncryptBindMessage(key.value, /*msg_id=*/1, inner);
+
+            auth::BindTempAuthKeyRequest req;
+            req.temp_auth_key_id = temp_id;
+            req.temp_session_id = 999;
+            req.perm_auth_key_id = raw_key_id;
+            req.nonce = inner.nonce;
+            req.expires_at = expires_at;
+            req.encrypted_message = encrypted;
+
+            // key_id already carries layer=177 from the UpdateClientInfo
+            // check earlier in this test; a fresh temp key with no Layer
+            // evidence of its own inherits that as the merged default (see
+            // store::MergeAuthKeyLayerObservations / the SQL function's
+            // identical logic).
+            const auto result = auth::BindTempAuthKey(auth_keys, temp_keys, req);
+            Check(result.layer == 177,
+                  "BindTempAuthKey happy path succeeds against the live telesrv_bind_temp_auth_key");
+
+            const auto stored = temp_keys.GetByTemp(temp_id);
+            Check(stored.has_value() && stored->perm_auth_key_id == raw_key_id && stored->temp_session_id == 999 &&
+                      stored->nonce == inner.nonce,
+                  "GetByTemp reads back the persisted binding");
+
+            const auto merged_temp = auth_keys.Get(temp_id);
+            const auto merged_perm = auth_keys.Get(key_id);
+            Check(merged_temp.has_value() && merged_perm.has_value() && merged_temp->layer == merged_perm->layer,
+                  "the bind function merges the same Layer default onto both rows");
+
+            try {
+                auth::BindTempAuthKeyRequest tampered = req;
+                tampered.nonce = req.nonce + 1; // no longer matches the encrypted proof
+                auth::BindTempAuthKey(auth_keys, temp_keys, tampered);
+                Check(false, "a request whose fields don't match the decrypted proof should be rejected");
+            } catch (const auth::EncryptedMessageInvalidError&) {
+                Check(true, "field mismatch against the decrypted proof throws EncryptedMessageInvalidError");
+            }
+
+            pqxx::work cleanup_temp(db.conn());
+            // temp_auth_key_bindings has ON DELETE CASCADE from
+            // temp_auth_key_id, so deleting the temp key alone is enough.
+            cleanup_temp.exec("DELETE FROM auth_keys WHERE auth_key_id = $1", pqxx::params{raw_temp_id});
+            cleanup_temp.commit();
+        }
 
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL: unexpected exception: %s\n", e.what());
