@@ -79,3 +79,11 @@ add_test(NAME mtproto_auth_messages_test COMMAND mtproto_auth_messages_test)
 add_executable(auth_sign_in_test auth_sign_in_test.cpp)
 target_link_libraries(auth_sign_in_test PRIVATE shuzagram_auth)
 add_test(NAME auth_sign_in_test COMMAND auth_sign_in_test)
+
+add_executable(mtproto_users_test mtproto_users_test.cpp)
+target_link_libraries(mtproto_users_test PRIVATE shuzagram_mtproto shuzagram_domain)
+add_test(NAME mtproto_users_test COMMAND mtproto_users_test)
+
+add_executable(get_users_test get_users_test.cpp)
+target_link_libraries(get_users_test PRIVATE shuzagram_users)
+add_test(NAME get_users_test COMMAND get_users_test)

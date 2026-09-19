@@ -1,2 +1,2 @@
 add_executable(shuzagram_server main.cpp)
-target_link_libraries(shuzagram_server PRIVATE shuzagram_mtproto shuzagram_store_postgres shuzagram_auth)
+target_link_libraries(shuzagram_server PRIVATE shuzagram_mtproto shuzagram_store_postgres shuzagram_auth shuzagram_users)

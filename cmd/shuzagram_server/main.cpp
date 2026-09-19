@@ -42,6 +42,7 @@
 #include "shuzagram/mtproto/messages/help.hpp"
 #include "shuzagram/mtproto/messages/password.hpp"
 #include "shuzagram/mtproto/messages/system.hpp"
+#include "shuzagram/mtproto/messages/users.hpp"
 #include "shuzagram/mtproto/rpc_dispatch.hpp"
 #include "shuzagram/mtproto/tcp_handshake_server.hpp"
 #include "shuzagram/store/memory/code_store.hpp"
@@ -50,6 +51,7 @@
 #include "shuzagram/store/postgres/password_store.hpp"
 #include "shuzagram/store/postgres/temp_auth_key_store.hpp"
 #include "shuzagram/store/postgres/user_store.hpp"
+#include "shuzagram/users/get_users.hpp"
 
 namespace {
 
@@ -344,6 +346,42 @@ std::vector<std::uint8_t> HandleAuthCheckPassword(std::mutex& db_mutex, shuzagra
     }
 }
 
+// users.getUsers. Resolves inputUserSelf/inputUser against whichever user_id
+// (if any) authorization_store has bound to this connection's auth_key_id --
+// see users::ResolveGetUsers for the faithful port of onUsersGetUsers, and
+// messages/users.hpp's EncodeUser for exactly which of the real user# TL
+// constructor's many optional fields this port actually fills in.
+std::vector<std::uint8_t> HandleUsersGetUsers(shuzagram::store::IAuthorizationStore& authorizations,
+                                               shuzagram::store::IUserStore& users,
+                                               shuzagram::mtproto::TLBuffer& body,
+                                               const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    try {
+        mtproto::messages::UsersGetUsersRequest req;
+        req.DecodeBare(body);
+
+        const auto resolved = shuzagram::users::ResolveGetUsers(authorizations, users, ctx.auth_key_id, req.ids);
+
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+
+        mtproto::TLBuffer out;
+        out.PutVectorHeader(static_cast<std::int32_t>(resolved.size()));
+        for (const auto& r : resolved) {
+            mtproto::messages::EncodeUser(out, r.user, r.self, now);
+        }
+        return out.buf;
+    } catch (const std::exception& e) {
+        // Covers domain::NotImplementedError from an inputUserFromMessage
+        // entry (see InputUser::Decode) as well as any store failure -- both
+        // are internal gaps/faults, never a client-correctable input error.
+        std::fprintf(stderr, "users.getUsers internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
 // help.getConfig. Deliberately registered unconditionally (not gated
 // behind Postgres being connected, unlike every auth.* handler above): the
 // real protocol allows this even on a connection that never logs in, and
@@ -462,6 +500,13 @@ int main() {
                                });
         std::printf("auth.sendCode/auth.signIn/auth.signUp/account.getPassword/auth.checkPassword are wired up "
                     "(dev fixed code only)\n");
+    }
+    if (user_store && authorization_store) {
+        rpc_registry.Register(mtproto::messages::UsersGetUsersRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleUsersGetUsers(*authorization_store, *user_store, body, ctx);
+                               });
+        std::printf("users.getUsers is wired up\n");
     }
 
     mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key),

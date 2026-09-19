@@ -76,6 +76,17 @@ target_include_directories(shuzagram_auth PUBLIC include)
 target_link_libraries(shuzagram_auth PUBLIC shuzagram_mtproto shuzagram_domain)
 target_compile_options(shuzagram_auth PRIVATE -Wall -Wextra)
 
+# users.getUsers business logic: resolving InputUser/InputUserSelf against
+# the auth_key's bound identity. Same shape as shuzagram_auth -- store
+# interfaces only, a concrete store is linked in by whichever executable
+# wires this up.
+add_library(shuzagram_users
+  src/users/get_users.cpp
+)
+target_include_directories(shuzagram_users PUBLIC include)
+target_link_libraries(shuzagram_users PUBLIC shuzagram_mtproto shuzagram_domain)
+target_compile_options(shuzagram_users PRIVATE -Wall -Wextra)
+
 enable_testing()
 add_subdirectory(tests)
 add_subdirectory(cmd/shuzagram_server)
