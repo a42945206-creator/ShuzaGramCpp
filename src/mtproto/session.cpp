@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <stdexcept>
 
+#include "shuzagram/mtproto/messages/invoke.hpp"
 #include "shuzagram/mtproto/messages/system.hpp"
 #include "shuzagram/mtproto/unencrypted_message.hpp"
 
@@ -36,6 +37,29 @@ std::vector<std::uint8_t> MtprotoSession::DispatchOne(std::int64_t msg_id, const
 
     TLBuffer b;
     b.buf = body;
+
+    // Strips invokeWithLayer/initConnection/invokeWithoutUpdates/
+    // invokeAfterMsg off the front, if present -- see messages/invoke.hpp
+    // for why this has to happen before anything else: real clients wrap
+    // almost every call in at least one of these, and without unwrapping,
+    // ping/msgs_ack/registry lookup below would all be matching against
+    // the WRAPPER's id instead of the real call's.
+    try {
+        UnwrapInvokeWrappers(b);
+    } catch (const std::exception& e) {
+        RpcError error;
+        error.error_code = 500;
+        error.error_message = std::string("INTERNAL ") + e.what();
+        TLBuffer error_out;
+        error.Encode(error_out);
+        RpcResult wrapped;
+        wrapped.req_msg_id = msg_id;
+        wrapped.result = std::move(error_out.buf);
+        TLBuffer out;
+        wrapped.Encode(out);
+        return out.buf;
+    }
+
     const std::uint32_t id = b.PeekID();
 
     if (id == Ping::kTypeId) {
