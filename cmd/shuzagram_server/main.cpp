@@ -22,6 +22,19 @@
 //                            override this to its actual reachable public IP.
 //   SHUZAGRAM_DC_ID          default 1 -- this deployment's only DC id
 //                            (single-backend, see NOTES/help-get-config-plan.md)
+//   SHUZAGRAM_OTP_WEBHOOK_URL      unset by default -- with no URL, auth.sendCode
+//                            keeps issuing the fixed "12345" dev code and
+//                            delivers nothing (same as before this existed).
+//                            Set to a real "OTP Webhook v1" endpoint (e.g.
+//                            the already-deployed numbot container's own
+//                            http://127.0.0.1:8080/otp) to deliver REAL
+//                            random login codes over SMS -- see
+//                            NOTES/otp-webhook-delivery-plan.md.
+//   SHUZAGRAM_OTP_WEBHOOK_SECRET   HMAC-SHA256 signing secret; must match the
+//                            receiving webhook's own configured secret.
+//   SHUZAGRAM_OTP_WEBHOOK_TIMEOUT_MS  default 5000
+//   SHUZAGRAM_OTP_CODE_LENGTH      default 5 -- digits in the delivered code
+//                            (only used when a webhook URL is configured)
 
 #include <atomic>
 #include <chrono>
@@ -48,6 +61,7 @@
 #include "shuzagram/mtproto/messages/users.hpp"
 #include "shuzagram/mtproto/rpc_dispatch.hpp"
 #include "shuzagram/mtproto/tcp_handshake_server.hpp"
+#include "shuzagram/otpdelivery/webhook_sender.hpp"
 #include "shuzagram/store/memory/code_store.hpp"
 #include "shuzagram/store/postgres/auth_key_store.hpp"
 #include "shuzagram/store/postgres/authorization_store.hpp"
@@ -150,6 +164,7 @@ std::vector<std::uint8_t> HandleAuthBindTempAuthKey(std::mutex& db_mutex, shuzag
 // wired up in this project).
 std::vector<std::uint8_t> HandleAuthSendCode(std::mutex& db_mutex, shuzagram::store::IUserStore& users,
                                               shuzagram::store::ICodeStore& codes,
+                                              shuzagram::otpdelivery::WebhookSender* otp_sender, int code_length,
                                               shuzagram::mtproto::TLBuffer& body) {
     using namespace shuzagram;
 
@@ -160,10 +175,14 @@ std::vector<std::uint8_t> HandleAuthSendCode(std::mutex& db_mutex, shuzagram::st
         std::string hash;
         {
             std::lock_guard<std::mutex> lock(db_mutex);
-            hash = auth::SendCode(users, codes, req.phone_number);
+            hash = auth::SendCode(users, codes, req.phone_number, "12345", otp_sender, code_length);
         }
         mtproto::messages::AuthSentCode resp;
-        resp.code_length = 5; // matches the fixed dev code's own length
+        // With no OTP sender configured, SendCode issues the fixed 5-digit
+        // dev code regardless of code_length -- report that real length,
+        // not the configured one, so a real client's "enter N digits" UI
+        // stays correct either way.
+        resp.code_length = otp_sender ? code_length : 5;
         resp.phone_code_hash = hash;
         mtproto::TLBuffer out;
         resp.Encode(out);
@@ -171,6 +190,9 @@ std::vector<std::uint8_t> HandleAuthSendCode(std::mutex& db_mutex, shuzagram::st
     } catch (const auth::PhoneNumberInvalidError&) {
         return EncodeRpcError(406, "PHONE_NUMBER_INVALID");
     } catch (const std::exception& e) {
+        // Mirrors onAuthSendCode: the public error stays opaque (INTERNAL)
+        // regardless of cause (store failure or OTP delivery failure) --
+        // never leak the phone number or code into the response.
         std::fprintf(stderr, "auth.sendCode internal error: %s\n", e.what());
         return EncodeRpcError(500, "INTERNAL");
     }
@@ -601,6 +623,22 @@ int main() {
     const std::string pg_dsn = GetEnvOr("SHUZAGRAM_PG_DSN", "");
     const std::string advertise_ip = GetEnvOr("SHUZAGRAM_ADVERTISE_IP", "127.0.0.1");
     const int dc_id = std::atoi(GetEnvOr("SHUZAGRAM_DC_ID", "1").c_str());
+    const std::string otp_webhook_url = GetEnvOr("SHUZAGRAM_OTP_WEBHOOK_URL", "");
+    const int otp_code_length = std::atoi(GetEnvOr("SHUZAGRAM_OTP_CODE_LENGTH", "5").c_str());
+
+    std::unique_ptr<otpdelivery::WebhookSender> otp_sender;
+    if (!otp_webhook_url.empty()) {
+        otpdelivery::WebhookSender::Config config;
+        config.url = otp_webhook_url;
+        config.secret = GetEnvOr("SHUZAGRAM_OTP_WEBHOOK_SECRET", "");
+        config.timeout =
+            std::chrono::milliseconds(std::atoi(GetEnvOr("SHUZAGRAM_OTP_WEBHOOK_TIMEOUT_MS", "5000").c_str()));
+        otp_sender = std::make_unique<otpdelivery::WebhookSender>(config);
+        std::printf("OTP webhook delivery configured: %s (real login codes will be sent for auth.sendCode)\n",
+                    otp_webhook_url.c_str());
+    } else {
+        std::printf("SHUZAGRAM_OTP_WEBHOOK_URL not set -- auth.sendCode will keep issuing the fixed dev code\n");
+    }
 
     mtproto::crypto::RsaPrivateKey key = [&] {
         try {
@@ -655,7 +693,8 @@ int main() {
     if (user_store && authorization_store && password_store) {
         rpc_registry.Register(mtproto::messages::AuthSendCodeRequest::kTypeId,
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext&) {
-                                   return HandleAuthSendCode(db_mutex, *user_store, code_store, body);
+                                   return HandleAuthSendCode(db_mutex, *user_store, code_store, otp_sender.get(),
+                                                              otp_code_length, body);
                                });
         rpc_registry.Register(mtproto::messages::AuthSignInRequest::kTypeId,
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {

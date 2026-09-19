@@ -6,14 +6,18 @@
 // not a re-simplified copy of it.
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #include "shuzagram/auth/sign_in.hpp"
 #include "shuzagram/domain/user_errors.hpp"
+#include "shuzagram/net/tcp_listener.hpp"
+#include "shuzagram/otpdelivery/webhook_sender.hpp"
 #include "shuzagram/store/memory/code_store.hpp"
 
 namespace {
@@ -271,6 +275,96 @@ void TestSignInWithPasswordThrowsSessionPasswordNeeded() {
           "SignIn still binds the authorization, with password_pending=true, before throwing");
 }
 
+// Helper server for the OTP-webhook SendCode tests below: reads one raw
+// HTTP request off a real loopback socket, extracts the JSON body's "code"
+// field with a plain substring search (good enough for a fixed-shape test
+// fixture), and answers with the given canned response.
+std::string ReadRequestBody(net::TcpSocket& socket) {
+    std::string head;
+    std::uint8_t byte = 0;
+    while (head.size() < 4 || head.compare(head.size() - 4, 4, "\r\n\r\n") != 0) {
+        socket.ReadExact(&byte, 1);
+        head.push_back(static_cast<char>(byte));
+    }
+    std::size_t content_length = 0;
+    const auto cl_pos = head.find("Content-Length:");
+    if (cl_pos != std::string::npos) content_length = static_cast<std::size_t>(std::stoul(head.substr(cl_pos + 16)));
+    std::string body(content_length, '\0');
+    if (content_length > 0) socket.ReadExact(reinterpret_cast<std::uint8_t*>(body.data()), content_length);
+    return body;
+}
+
+std::string ExtractJsonStringField(const std::string& body, const std::string& key) {
+    const auto needle = "\"" + key + "\":\"";
+    const auto pos = body.find(needle);
+    if (pos == std::string::npos) return "";
+    const auto start = pos + needle.size();
+    const auto end = body.find('"', start);
+    return body.substr(start, end - start);
+}
+
+void TestSendCodeWithOtpSenderGeneratesRandomCodeAndDelivers() {
+    net::TcpListener listener("127.0.0.1", 0);
+    std::string delivered_code;
+    std::string delivered_recipient;
+
+    std::thread server([&] {
+        auto socket = listener.Accept();
+        const auto body = ReadRequestBody(socket);
+        delivered_code = ExtractJsonStringField(body, "code");
+        delivered_recipient = ExtractJsonStringField(body, "recipient");
+        const std::string resp_body = R"({"accepted":true,"message_id":"m1"})";
+        const std::string raw =
+            "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(resp_body.size()) + "\r\n\r\n" + resp_body;
+        socket.WriteAll(reinterpret_cast<const std::uint8_t*>(raw.data()), raw.size());
+    });
+
+    otpdelivery::WebhookSender::Config config;
+    config.url = "http://127.0.0.1:" + std::to_string(listener.Port()) + "/otp";
+    config.timeout = std::chrono::seconds(5);
+    otpdelivery::WebhookSender sender(config);
+
+    Fixture f(20);
+    const auto hash = auth::SendCode(f.users, f.codes, "+1 555 000 2000", "12345", &sender, /*code_length=*/5);
+    server.join();
+
+    Check(delivered_recipient == "15550002000", "the normalized phone is sent as the recipient");
+    Check(delivered_code.size() == 5, "a real 5-digit code is generated when an OTP sender is configured");
+    Check(delivered_code != "12345", "the delivered code is not the fixed dev code");
+    for (char c : delivered_code) Check(c >= '0' && c <= '9', "every character of the code is a digit");
+
+    // The code the client must submit is exactly the one that was
+    // delivered, not the fixed dev code -- SignIn must accept it.
+    const auto result = auth::SignIn(f.users, f.authorizations, f.codes, f.auth_template, "+1 555 000 2000", hash,
+                                      delivered_code);
+    Check(result.need_sign_up, "no account exists yet for this phone, so sign-up is required");
+}
+
+void TestSendCodeRollsBackOnDeliveryFailure() {
+    net::TcpListener listener("127.0.0.1", 0);
+    const auto port = listener.Port();
+    listener.Close(); // nothing is listening -- every delivery attempt fails
+
+    otpdelivery::WebhookSender::Config config;
+    config.url = "http://127.0.0.1:" + std::to_string(port) + "/otp";
+    config.timeout = std::chrono::seconds(1);
+    otpdelivery::WebhookSender sender(config);
+
+    Fixture f(21);
+    bool threw = false;
+    try {
+        auth::SendCode(f.users, f.codes, "+1 555 000 2001", "12345", &sender);
+    } catch (const otpdelivery::DeliveryFailedError&) {
+        threw = true;
+    }
+    Check(threw, "SendCode propagates a delivery failure instead of silently succeeding");
+    // SendCode never returns the hash on this path (the exception propagates
+    // before its `return hash` line), so there is no key a black-box test
+    // could look up to confirm codes.Del(hash) ran -- that rollback call is
+    // covered by reading sign_in.cpp directly (mirrors rollbackUndeliveredCode
+    // in the Go source) rather than by a second, store-internals-peeking test.
+}
+
 } // namespace
 
 int main() {
@@ -282,6 +376,8 @@ int main() {
     TestSignUpRejectsEmptyFirstName();
     TestSignUpWithoutPriorSignInIsRejected();
     TestSignInWithPasswordThrowsSessionPasswordNeeded();
+    TestSendCodeWithOtpSenderGeneratesRandomCodeAndDelivers();
+    TestSendCodeRollsBackOnDeliveryFailure();
     if (g_failures == 0) {
         std::printf("all auth::SendCode/SignIn/SignUp tests passed\n");
         return 0;

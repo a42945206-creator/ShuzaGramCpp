@@ -77,7 +77,7 @@ target_link_libraries(mtproto_auth_messages_test PRIVATE shuzagram_mtproto)
 add_test(NAME mtproto_auth_messages_test COMMAND mtproto_auth_messages_test)
 
 add_executable(auth_sign_in_test auth_sign_in_test.cpp)
-target_link_libraries(auth_sign_in_test PRIVATE shuzagram_auth)
+target_link_libraries(auth_sign_in_test PRIVATE shuzagram_auth Threads::Threads)
 add_test(NAME auth_sign_in_test COMMAND auth_sign_in_test)
 
 add_executable(mtproto_users_test mtproto_users_test.cpp)
@@ -107,3 +107,11 @@ add_test(NAME username_test COMMAND username_test)
 add_executable(update_birthday_test update_birthday_test.cpp)
 target_link_libraries(update_birthday_test PRIVATE shuzagram_users)
 add_test(NAME update_birthday_test COMMAND update_birthday_test)
+
+add_executable(http_client_test http_client_test.cpp)
+target_link_libraries(http_client_test PRIVATE shuzagram_mtproto Threads::Threads)
+add_test(NAME http_client_test COMMAND http_client_test)
+
+add_executable(otp_webhook_test otp_webhook_test.cpp)
+target_link_libraries(otp_webhook_test PRIVATE shuzagram_otpdelivery Threads::Threads)
+add_test(NAME otp_webhook_test COMMAND otp_webhook_test)

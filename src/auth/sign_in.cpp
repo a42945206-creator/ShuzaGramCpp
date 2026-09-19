@@ -23,6 +23,17 @@ std::string RandomHex(std::size_t n) {
     return out;
 }
 
+// randomDigits from internal/app/auth/service.go: n<=0 defaults to 6, each
+// digit is a random byte mod 10 (the same small modulo bias the Go source
+// itself accepts -- not "fixed" here, for exact behavioral parity).
+std::string RandomDigits(int n) {
+    const std::size_t len = n > 0 ? static_cast<std::size_t>(n) : 6;
+    const auto bytes = mtproto::crypto::SystemRandomBytes(len);
+    std::string out(len, '0');
+    for (std::size_t i = 0; i < len; ++i) out[i] = static_cast<char>('0' + (bytes[i] % 10));
+    return out;
+}
+
 std::int64_t RandomInt64() {
     const auto bytes = mtproto::crypto::SystemRandomBytes(8);
     std::int64_t v;
@@ -99,7 +110,8 @@ VerifiedLogin VerifyLoginCode(store::IUserStore& users, store::ICodeStore& codes
 } // namespace
 
 std::string SendCode(store::IUserStore& users, store::ICodeStore& codes, const std::string& phone_number,
-                      const std::string& fixed_code) {
+                      const std::string& fixed_code, otpdelivery::WebhookSender* otp_sender, int code_length,
+                      std::chrono::seconds code_ttl) {
     const std::string phone = domain::NormalizePhone(phone_number);
     if (!domain::ValidPhone(phone)) throw PhoneNumberInvalidError();
 
@@ -107,8 +119,29 @@ std::string SendCode(store::IUserStore& users, store::ICodeStore& codes, const s
     store::PhoneCode rec;
     rec.issued_user_id = CurrentPhoneOwnerId(users, phone);
     rec.phone = phone;
-    rec.code = fixed_code;
+    rec.code = otp_sender ? RandomDigits(code_length) : fixed_code;
     codes.Set(hash, rec);
+
+    if (otp_sender) {
+        const auto expires_at = std::chrono::duration_cast<std::chrono::seconds>(
+                                     std::chrono::system_clock::now().time_since_epoch()) +
+                                 code_ttl;
+        otpdelivery::Request request;
+        request.delivery_id = otpdelivery::NewDeliveryID();
+        request.purpose = "login_sms";
+        request.channel = "sms";
+        request.recipient = phone;
+        request.code = rec.code;
+        request.expires_at = expires_at.count();
+        try {
+            otp_sender->Deliver(request);
+        } catch (const otpdelivery::DeliveryFailedError&) {
+            // Mirrors rollbackUndeliveredCode: a code nobody actually
+            // received must not remain guessable/usable.
+            codes.Del(hash);
+            throw;
+        }
+    }
     return hash;
 }
 

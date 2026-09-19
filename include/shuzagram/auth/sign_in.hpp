@@ -1,9 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <stdexcept>
 #include <string>
 
 #include "shuzagram/domain/authorization.hpp"
+#include "shuzagram/otpdelivery/webhook_sender.hpp"
 #include "shuzagram/store/authorization_store.hpp"
 #include "shuzagram/store/code_store.hpp"
 #include "shuzagram/store/password_store.hpp"
@@ -50,12 +52,22 @@ public:
     SessionPasswordNeededError() : std::runtime_error("session password needed") {}
 };
 
-// Issues a phone_code_hash for `phone_number` using a fixed development
-// code (no real SMS/email delivery in this slice -- mirrors the Go
-// source's own fallback behavior when no external provider is configured).
-// Throws PhoneNumberInvalidError.
+// Issues a phone_code_hash for `phone_number`. With otp_sender == nullptr,
+// uses a fixed development code and delivers nothing -- mirrors the Go
+// source's own fallback behavior when no external provider is configured
+// (createPhoneCode's `code := s.fixedCode` branch, not a simplification
+// unique to this port). With a real otp_sender, mirrors the Go source's
+// provider branch exactly: a fresh random code_length-digit code is
+// generated and delivered through the "OTP Webhook v1" protocol (see
+// NOTES/otp-webhook-delivery-plan.md); a delivery failure rolls the issued
+// code back and rethrows otpdelivery::DeliveryFailedError, so a caller
+// never ends up with a code that was never actually sent anywhere.
+//
+// Throws PhoneNumberInvalidError, or otpdelivery::DeliveryFailedError if
+// otp_sender is set and delivery fails.
 std::string SendCode(store::IUserStore& users, store::ICodeStore& codes, const std::string& phone_number,
-                      const std::string& fixed_code = "12345");
+                      const std::string& fixed_code = "12345", otpdelivery::WebhookSender* otp_sender = nullptr,
+                      int code_length = 5, std::chrono::seconds code_ttl = std::chrono::seconds(300));
 
 struct SignInResult {
     // true: the code was correct but no account exists for this phone yet

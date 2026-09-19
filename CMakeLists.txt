@@ -54,6 +54,7 @@ add_library(shuzagram_mtproto
   src/mtproto/crypto/srp.cpp
   src/net/tcp_socket.cpp
   src/net/tcp_listener.cpp
+  src/net/http_client.cpp
   src/mtproto/tcp_handshake_server.cpp
   src/mtproto/session.cpp
 )
@@ -61,6 +62,16 @@ target_include_directories(shuzagram_mtproto PUBLIC include)
 find_package(Threads REQUIRED)
 target_link_libraries(shuzagram_mtproto PUBLIC OpenSSL::Crypto Threads::Threads)
 target_compile_options(shuzagram_mtproto PRIVATE -Wall -Wextra)
+
+# OTP webhook delivery (real SMS/email code delivery, "OTP Webhook v1" --
+# see NOTES/otp-webhook-delivery-plan.md). Needs the raw HTTP client and
+# random bytes from shuzagram_mtproto plus JSON for the wire body.
+add_library(shuzagram_otpdelivery
+  src/otpdelivery/webhook_sender.cpp
+)
+target_include_directories(shuzagram_otpdelivery PUBLIC include)
+target_link_libraries(shuzagram_otpdelivery PUBLIC shuzagram_mtproto nlohmann_json::nlohmann_json OpenSSL::Crypto)
+target_compile_options(shuzagram_otpdelivery PRIVATE -Wall -Wextra)
 
 # The auth.bindTempAuthKey business logic: the one piece that needs both
 # crypto (shuzagram_mtproto) and the store interfaces (header-only; a
@@ -74,7 +85,7 @@ add_library(shuzagram_auth
   src/store/memory/code_store.cpp
 )
 target_include_directories(shuzagram_auth PUBLIC include)
-target_link_libraries(shuzagram_auth PUBLIC shuzagram_mtproto shuzagram_domain)
+target_link_libraries(shuzagram_auth PUBLIC shuzagram_mtproto shuzagram_domain shuzagram_otpdelivery)
 target_compile_options(shuzagram_auth PRIVATE -Wall -Wextra)
 
 # users.getUsers business logic: resolving InputUser/InputUserSelf against
