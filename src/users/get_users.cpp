@@ -3,6 +3,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "shuzagram/auth/current_user.hpp"
+
 namespace shuzagram::users {
 
 std::vector<ResolvedUser> ResolveGetUsers(store::IAuthorizationStore& authorizations, store::IUserStore& users,
@@ -10,9 +12,9 @@ std::vector<ResolvedUser> ResolveGetUsers(store::IAuthorizationStore& authorizat
                                            const std::vector<mtproto::messages::InputUser>& inputs) {
     using mtproto::messages::InputUser;
 
-    const auto authz = authorizations.ByAuthKey(auth_key_id);
-    const bool authorized = authz.has_value() && !authz->password_pending;
-    const std::int64_t current_user_id = authorized ? authz->user_id : 0;
+    const auto current = auth::ResolveCurrentUser(authorizations, auth_key_id);
+    const bool authorized = current.authorized;
+    const std::int64_t current_user_id = current.user_id;
 
     bool need_self = false;
     std::vector<InputUser> resolved_inputs;

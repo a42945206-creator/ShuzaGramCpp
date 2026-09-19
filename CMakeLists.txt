@@ -70,6 +70,7 @@ add_library(shuzagram_auth
   src/auth/bind_temp_auth_key.cpp
   src/auth/sign_in.cpp
   src/auth/check_password.cpp
+  src/auth/current_user.cpp
   src/store/memory/code_store.cpp
 )
 target_include_directories(shuzagram_auth PUBLIC include)
@@ -77,15 +78,25 @@ target_link_libraries(shuzagram_auth PUBLIC shuzagram_mtproto shuzagram_domain)
 target_compile_options(shuzagram_auth PRIVATE -Wall -Wextra)
 
 # users.getUsers business logic: resolving InputUser/InputUserSelf against
-# the auth_key's bound identity. Same shape as shuzagram_auth -- store
-# interfaces only, a concrete store is linked in by whichever executable
-# wires this up.
+# the auth_key's bound identity (via shuzagram_auth's ResolveCurrentUser).
+# Same shape as shuzagram_auth -- store interfaces only, a concrete store is
+# linked in by whichever executable wires this up.
 add_library(shuzagram_users
   src/users/get_users.cpp
 )
 target_include_directories(shuzagram_users PUBLIC include)
-target_link_libraries(shuzagram_users PUBLIC shuzagram_mtproto shuzagram_domain)
+target_link_libraries(shuzagram_users PUBLIC shuzagram_mtproto shuzagram_domain shuzagram_auth)
 target_compile_options(shuzagram_users PRIVATE -Wall -Wextra)
+
+# account.updateStatus business logic: the durable half of
+# setPresenceFromContext/persistLastSeen (see NOTES/account-update-status-plan.md
+# for what's cut). Same shape as shuzagram_users.
+add_library(shuzagram_account
+  src/account/update_status.cpp
+)
+target_include_directories(shuzagram_account PUBLIC include)
+target_link_libraries(shuzagram_account PUBLIC shuzagram_mtproto shuzagram_domain shuzagram_auth)
+target_compile_options(shuzagram_account PRIVATE -Wall -Wextra)
 
 enable_testing()
 add_subdirectory(tests)

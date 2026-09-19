@@ -87,3 +87,11 @@ add_test(NAME mtproto_users_test COMMAND mtproto_users_test)
 add_executable(get_users_test get_users_test.cpp)
 target_link_libraries(get_users_test PRIVATE shuzagram_users)
 add_test(NAME get_users_test COMMAND get_users_test)
+
+add_executable(mtproto_account_test mtproto_account_test.cpp)
+target_link_libraries(mtproto_account_test PRIVATE shuzagram_mtproto)
+add_test(NAME mtproto_account_test COMMAND mtproto_account_test)
+
+add_executable(update_status_test update_status_test.cpp)
+target_link_libraries(update_status_test PRIVATE shuzagram_account)
+add_test(NAME update_status_test COMMAND update_status_test)

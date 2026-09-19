@@ -32,6 +32,7 @@
 #include <mutex>
 #include <string>
 
+#include "shuzagram/account/update_status.hpp"
 #include "shuzagram/auth/bind_temp_auth_key.hpp"
 #include "shuzagram/auth/check_password.hpp"
 #include "shuzagram/auth/sign_in.hpp"
@@ -40,6 +41,7 @@
 #include "shuzagram/mtproto/messages/bind.hpp"
 #include "shuzagram/mtproto/messages/bool.hpp"
 #include "shuzagram/mtproto/messages/help.hpp"
+#include "shuzagram/mtproto/messages/account.hpp"
 #include "shuzagram/mtproto/messages/password.hpp"
 #include "shuzagram/mtproto/messages/system.hpp"
 #include "shuzagram/mtproto/messages/users.hpp"
@@ -382,6 +384,35 @@ std::vector<std::uint8_t> HandleUsersGetUsers(shuzagram::store::IAuthorizationSt
     }
 }
 
+// account.updateStatus. Always answers boolTrue, exactly like the real
+// onAccountUpdateStatus (even an unauthorized/password-pending caller gets
+// true back -- it's a deliberate no-op there, never an error). See
+// account::UpdateStatus's doc comment for what's cut relative to the Go
+// source (live presence push, write debounce).
+std::vector<std::uint8_t> HandleAccountUpdateStatus(shuzagram::store::IAuthorizationStore& authorizations,
+                                                     shuzagram::store::IUserStore& users,
+                                                     shuzagram::mtproto::TLBuffer& body,
+                                                     const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    try {
+        mtproto::messages::AccountUpdateStatusRequest req;
+        req.DecodeBare(body);
+
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+        account::UpdateStatus(authorizations, users, ctx.auth_key_id, static_cast<int>(now));
+
+        mtproto::TLBuffer out;
+        mtproto::messages::EncodeBool(out, true);
+        return out.buf;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "account.updateStatus internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
 // help.getConfig. Deliberately registered unconditionally (not gated
 // behind Postgres being connected, unlike every auth.* handler above): the
 // real protocol allows this even on a connection that never logs in, and
@@ -506,7 +537,11 @@ int main() {
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
                                    return HandleUsersGetUsers(*authorization_store, *user_store, body, ctx);
                                });
-        std::printf("users.getUsers is wired up\n");
+        rpc_registry.Register(mtproto::messages::AccountUpdateStatusRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAccountUpdateStatus(*authorization_store, *user_store, body, ctx);
+                               });
+        std::printf("users.getUsers/account.updateStatus are wired up\n");
     }
 
     mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key),
