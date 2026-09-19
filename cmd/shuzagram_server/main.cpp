@@ -55,6 +55,7 @@
 #include "shuzagram/store/postgres/temp_auth_key_store.hpp"
 #include "shuzagram/store/postgres/user_store.hpp"
 #include "shuzagram/users/get_users.hpp"
+#include "shuzagram/users/update_birthday.hpp"
 #include "shuzagram/users/update_profile.hpp"
 #include "shuzagram/users/username.hpp"
 
@@ -535,6 +536,31 @@ std::vector<std::uint8_t> HandleAccountUpdateUsername(shuzagram::store::IAuthori
     }
 }
 
+// account.updateBirthday.
+std::vector<std::uint8_t> HandleAccountUpdateBirthday(shuzagram::store::IAuthorizationStore& authorizations,
+                                                       shuzagram::store::IUserStore& users,
+                                                       shuzagram::mtproto::TLBuffer& body,
+                                                       const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    try {
+        mtproto::messages::AccountUpdateBirthdayRequest req;
+        req.DecodeBare(body);
+
+        const auto current = auth::ResolveCurrentUser(authorizations, ctx.auth_key_id);
+        shuzagram::users::UpdateBirthday(users, current.user_id, req.birthday);
+
+        mtproto::TLBuffer out;
+        mtproto::messages::EncodeBool(out, true);
+        return out.buf;
+    } catch (const domain::BirthdayInvalidError&) {
+        return EncodeRpcError(400, "BIRTHDAY_INVALID");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "account.updateBirthday internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
 // help.getConfig. Deliberately registered unconditionally (not gated
 // behind Postgres being connected, unlike every auth.* handler above): the
 // real protocol allows this even on a connection that never logs in, and
@@ -679,8 +705,13 @@ int main() {
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
                                    return HandleAccountUpdateUsername(*authorization_store, *user_store, body, ctx);
                                });
+        rpc_registry.Register(mtproto::messages::AccountUpdateBirthdayRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAccountUpdateBirthday(*authorization_store, *user_store, body, ctx);
+                               });
         std::printf("users.getUsers/account.updateStatus/account.getAuthorizations/"
-                    "account.updateProfile/account.checkUsername/account.updateUsername are wired up\n");
+                    "account.updateProfile/account.checkUsername/account.updateUsername/"
+                    "account.updateBirthday are wired up\n");
     }
 
     mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key),

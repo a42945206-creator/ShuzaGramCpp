@@ -85,6 +85,7 @@ add_library(shuzagram_users
   src/users/get_users.cpp
   src/users/update_profile.cpp
   src/users/username.cpp
+  src/users/update_birthday.cpp
 )
 target_include_directories(shuzagram_users PUBLIC include)
 target_link_libraries(shuzagram_users PUBLIC shuzagram_mtproto shuzagram_domain shuzagram_auth)

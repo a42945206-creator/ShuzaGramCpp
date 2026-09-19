@@ -211,6 +211,52 @@ void TestDecodeAccountUpdateUsernameRequest() {
     Check(req.username.empty(), "an empty string decodes correctly (clears the username)");
 }
 
+void TestDecodeBirthdayWithoutYear() {
+    TLBuffer b;
+    b.PutUint32(0); // no year flag
+    b.PutInt32(15);
+    b.PutInt32(6);
+    const auto birthday = DecodeBirthday(b);
+    Check(birthday.day == 15, "day decoded");
+    Check(birthday.month == 6, "month decoded");
+    Check(birthday.year == 0, "year stays 0 when its flag is unset");
+    Check(b.buf.empty(), "no leftover bytes");
+}
+
+void TestDecodeBirthdayWithYear() {
+    TLBuffer b;
+    b.PutUint32(1u << 0);
+    b.PutInt32(15);
+    b.PutInt32(6);
+    b.PutInt32(1990);
+    const auto birthday = DecodeBirthday(b);
+    Check(birthday.year == 1990, "year decoded when its flag is set");
+}
+
+void TestDecodeAccountUpdateBirthdayRequest() {
+    {
+        // Flag bit 0 unset -- absent birthday, must decode to the clearing
+        // zero value, not leave the field uninitialized.
+        TLBuffer b;
+        b.PutUint32(0);
+        AccountUpdateBirthdayRequest req;
+        req.DecodeBare(b);
+        Check(!req.birthday.IsSet(), "an absent birthday decodes to the zero (clearing) value");
+        Check(b.buf.empty(), "no leftover bytes");
+    }
+    {
+        TLBuffer b;
+        b.PutUint32(1u << 0);
+        b.PutUint32(0); // nested Birthday's own flags: no year
+        b.PutInt32(1);
+        b.PutInt32(1);
+        AccountUpdateBirthdayRequest req;
+        req.DecodeBare(b);
+        Check(req.birthday.day == 1 && req.birthday.month == 1, "a present birthday is decoded");
+        Check(b.buf.empty(), "no leftover bytes");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -221,6 +267,9 @@ int main() {
     TestDecodeAccountUpdateProfileRequest();
     TestDecodeAccountCheckUsernameRequest();
     TestDecodeAccountUpdateUsernameRequest();
+    TestDecodeBirthdayWithoutYear();
+    TestDecodeBirthdayWithYear();
+    TestDecodeAccountUpdateBirthdayRequest();
     TestEncodeAuthorizationCurrentAndOfficialAppFlags();
     TestEncodeAuthorizationNotCurrent();
     TestEncodeAccountAuthorizations();

@@ -103,3 +103,7 @@ add_test(NAME update_profile_test COMMAND update_profile_test)
 add_executable(username_test username_test.cpp)
 target_link_libraries(username_test PRIVATE shuzagram_users)
 add_test(NAME username_test COMMAND username_test)
+
+add_executable(update_birthday_test update_birthday_test.cpp)
+target_link_libraries(update_birthday_test PRIVATE shuzagram_users)
+add_test(NAME update_birthday_test COMMAND update_birthday_test)

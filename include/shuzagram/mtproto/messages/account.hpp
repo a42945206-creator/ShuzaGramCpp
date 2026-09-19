@@ -25,12 +25,14 @@
 //   last_name:flags.1?string about:flags.2?string = User;
 // account.checkUsername#2714d86c username:string = Bool;
 // account.updateUsername#3e0bdd7c username:string = User;
+// account.updateBirthday#cc6e0c11 flags:# birthday:flags.0?Birthday = Bool;
+// birthday#6c8e1e06 flags:# day:int month:int year:flags.0?int = Birthday;
 //
 // Constructor ids copied from gotd/td (github.com/iamxvbaba/td@v1.3.3,
 // tg/tl_{account_update_status,account_get_authorizations,
 // account_authorizations,authorization,account_update_profile,
-// account_check_username,account_update_username}_gen.go), same as every
-// other messages/ header in this project.
+// account_check_username,account_update_username,account_update_birthday,
+// birthday}_gen.go), same as every other messages/ header in this project.
 namespace shuzagram::mtproto::messages {
 
 struct AccountUpdateStatusRequest {
@@ -101,6 +103,32 @@ struct AccountUpdateUsernameRequest {
     void DecodeBare(TLBuffer& b) {
         const auto v = b.GetBytes();
         username.assign(v.begin(), v.end());
+    }
+};
+
+// birthday#6c8e1e06 flags:# day:int month:int year:flags.0?int = Birthday;
+inline domain::Birthday DecodeBirthday(TLBuffer& b) {
+    constexpr std::uint32_t kFlagYear = 1u << 0;
+    const std::uint32_t flags = b.Uint32();
+    domain::Birthday birthday;
+    birthday.day = b.Int32();
+    birthday.month = b.Int32();
+    if (flags & kFlagYear) birthday.year = b.Int32();
+    return birthday;
+}
+
+// account.updateBirthday#cc6e0c11 flags:# birthday:flags.0?Birthday = Bool;
+//
+// Absent birthday (flag bit 0 unset) means "clear it" -- decodes to the
+// domain zero value, same as users::UpdateBirthday's own normalization.
+struct AccountUpdateBirthdayRequest {
+    static constexpr std::uint32_t kTypeId = 0xcc6e0c11;
+    domain::Birthday birthday;
+
+    void DecodeBare(TLBuffer& b) {
+        constexpr std::uint32_t kFlagBirthday = 1u << 0;
+        const std::uint32_t flags = b.Uint32();
+        birthday = (flags & kFlagBirthday) ? DecodeBirthday(b) : domain::Birthday{};
     }
 };
 
