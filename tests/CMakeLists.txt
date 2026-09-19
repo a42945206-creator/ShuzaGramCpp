@@ -48,6 +48,10 @@ add_executable(mtproto_invoke_wrappers_test mtproto_invoke_wrappers_test.cpp)
 target_link_libraries(mtproto_invoke_wrappers_test PRIVATE shuzagram_mtproto)
 add_test(NAME mtproto_invoke_wrappers_test COMMAND mtproto_invoke_wrappers_test)
 
+add_executable(mtproto_help_config_test mtproto_help_config_test.cpp)
+target_link_libraries(mtproto_help_config_test PRIVATE shuzagram_mtproto)
+add_test(NAME mtproto_help_config_test COMMAND mtproto_help_config_test)
+
 add_executable(mtproto_bind_test mtproto_bind_test.cpp)
 target_link_libraries(mtproto_bind_test PRIVATE shuzagram_mtproto)
 add_test(NAME mtproto_bind_test COMMAND mtproto_bind_test)

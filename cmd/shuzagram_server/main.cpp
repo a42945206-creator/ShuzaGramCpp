@@ -15,8 +15,16 @@
 //   SHUZAGRAM_PG_DSN         libpq connection string; if unset, the server
 //                            still runs the handshake but doesn't persist
 //                            the resulting auth_key anywhere (logged only)
+//   SHUZAGRAM_ADVERTISE_IP   default "127.0.0.1" -- the address help.getConfig
+//                            tells clients to (re)connect to. SHUZAGRAM_BIND_ADDRESS
+//                            (often 0.0.0.0, "listen on every interface") is
+//                            never a valid value here -- a real deployment MUST
+//                            override this to its actual reachable public IP.
+//   SHUZAGRAM_DC_ID          default 1 -- this deployment's only DC id
+//                            (single-backend, see NOTES/help-get-config-plan.md)
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +39,7 @@
 #include "shuzagram/mtproto/messages/auth.hpp"
 #include "shuzagram/mtproto/messages/bind.hpp"
 #include "shuzagram/mtproto/messages/bool.hpp"
+#include "shuzagram/mtproto/messages/help.hpp"
 #include "shuzagram/mtproto/messages/password.hpp"
 #include "shuzagram/mtproto/messages/system.hpp"
 #include "shuzagram/mtproto/rpc_dispatch.hpp"
@@ -335,6 +344,35 @@ std::vector<std::uint8_t> HandleAuthCheckPassword(std::mutex& db_mutex, shuzagra
     }
 }
 
+// help.getConfig. Deliberately registered unconditionally (not gated
+// behind Postgres being connected, unlike every auth.* handler above): the
+// real protocol allows this even on a connection that never logs in, and
+// it needs no store at all -- see messages/help.hpp for exactly which
+// values are faithfully copied from the Go source's BuildConfig versus
+// left at their zero/unset state.
+std::vector<std::uint8_t> HandleHelpGetConfig(int dc_id, const std::string& advertise_ip, int advertise_port,
+                                               shuzagram::mtproto::TLBuffer& body) {
+    using namespace shuzagram;
+
+    mtproto::messages::HelpGetConfigRequest req;
+    req.DecodeBare(body);
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+
+    mtproto::messages::Config config;
+    config.dc = dc_id;
+    config.ip_address = advertise_ip;
+    config.port = advertise_port;
+    config.date = now;
+    config.expires = now + 3600; // matches BuildConfig's now.Add(time.Hour)
+
+    mtproto::TLBuffer out;
+    config.Encode(out);
+    return out.buf;
+}
+
 } // namespace
 
 int main() {
@@ -344,6 +382,8 @@ int main() {
     const int port = std::atoi(GetEnvOr("SHUZAGRAM_PORT", "2398").c_str());
     const std::string rsa_key_path = GetEnvOr("SHUZAGRAM_RSA_KEY_PATH", "./shuzagram-server-rsa.pem");
     const std::string pg_dsn = GetEnvOr("SHUZAGRAM_PG_DSN", "");
+    const std::string advertise_ip = GetEnvOr("SHUZAGRAM_ADVERTISE_IP", "127.0.0.1");
+    const int dc_id = std::atoi(GetEnvOr("SHUZAGRAM_DC_ID", "1").c_str());
 
     mtproto::crypto::RsaPrivateKey key = [&] {
         try {
@@ -382,6 +422,11 @@ int main() {
     }
 
     mtproto::RpcHandlerRegistry rpc_registry;
+    rpc_registry.Register(mtproto::messages::HelpGetConfigRequest::kTypeId,
+                           [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext&) {
+                               return HandleHelpGetConfig(dc_id, advertise_ip, port, body);
+                           });
+    std::printf("help.getConfig is wired up (advertising %s:%d as DC %d)\n", advertise_ip.c_str(), port, dc_id);
     if (auth_key_store && temp_key_store) {
         rpc_registry.Register(mtproto::messages::AuthBindTempAuthKeyRequest::kTypeId,
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
