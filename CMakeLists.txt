@@ -42,6 +42,7 @@ target_compile_options(shuzagram_store_postgres PRIVATE -Wall -Wextra)
 
 add_library(shuzagram_mtproto
   src/mtproto/crypto/aes_ige.cpp
+  src/mtproto/crypto/aes_ctr.cpp
   src/mtproto/crypto/rsa.cpp
   src/mtproto/crypto/rsa_pad.cpp
   src/mtproto/crypto/random.cpp
@@ -52,6 +53,8 @@ add_library(shuzagram_mtproto
   src/mtproto/crypto/kdf_v1.cpp
   src/mtproto/crypto/bind.cpp
   src/mtproto/crypto/srp.cpp
+  src/mtproto/transport/obfuscated2.cpp
+  src/mtproto/transport/detect_transport.cpp
   src/net/tcp_socket.cpp
   src/net/tcp_listener.cpp
   src/net/http_client.cpp

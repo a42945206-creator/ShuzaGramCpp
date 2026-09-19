@@ -5,7 +5,7 @@
 
 #include "shuzagram/mtproto/crypto/message_cipher.hpp"
 #include "shuzagram/mtproto/session.hpp"
-#include "shuzagram/mtproto/transport/detect_codec.hpp"
+#include "shuzagram/mtproto/transport/detect_transport.hpp"
 
 namespace shuzagram::mtproto {
 
@@ -31,11 +31,16 @@ void TcpHandshakeServer::Run(const SuccessHandler& on_success, const FailureHand
             try {
                 auto reader = socket.Reader();
                 auto writer = socket.Writer();
-                transport::DetectedCodec detected = transport::DetectCodec(reader);
+                // DetectTransport (not the bare DetectCodec this project
+                // used before this round) transparently also accepts
+                // obfuscated2 -- what a real client sends by default -- see
+                // NOTES/obfuscated2-transport-plan.md. No MTProxy secret:
+                // this server is a direct DC, not a proxy hop.
+                transport::DetectedTransport detected = transport::DetectTransport(reader, writer);
                 ServerExchange exchange(key_);
                 const ServerExchangeResult result = exchange.Run(
                     [&] { return detected.codec->Read(detected.read); },
-                    [&](const std::vector<std::uint8_t>& frame) { detected.codec->Write(writer, frame); });
+                    [&](const std::vector<std::uint8_t>& frame) { detected.codec->Write(detected.write, frame); });
                 if (on_success) on_success(result);
 
                 if (!rpc_registry_) return; // old behavior: close right after the handshake
@@ -59,7 +64,7 @@ void TcpHandshakeServer::Run(const SuccessHandler& on_success, const FailureHand
                     for (const auto& reply : replies) {
                         TLBuffer out;
                         reply.Encode(out);
-                        detected.codec->Write(writer, out.buf);
+                        detected.codec->Write(detected.write, out.buf);
                     }
                 }
             } catch (const std::exception& e) {

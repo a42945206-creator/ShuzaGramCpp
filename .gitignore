@@ -6,3 +6,9 @@ compile_commands.json
 
 # Local working notes -- never committed.
 /NOTES/
+
+# Runtime artifacts from manually running shuzagram_server in this
+# checkout (RSA private key, logs) -- never committed, generated fresh per
+# deployment.
+*.pem
+*.log

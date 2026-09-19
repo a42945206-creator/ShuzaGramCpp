@@ -60,6 +60,14 @@ add_executable(mtproto_srp_test mtproto_srp_test.cpp)
 target_link_libraries(mtproto_srp_test PRIVATE shuzagram_mtproto)
 add_test(NAME mtproto_srp_test COMMAND mtproto_srp_test)
 
+add_executable(mtproto_obfuscated2_test mtproto_obfuscated2_test.cpp)
+target_link_libraries(mtproto_obfuscated2_test PRIVATE shuzagram_mtproto)
+add_test(NAME mtproto_obfuscated2_test COMMAND mtproto_obfuscated2_test)
+
+add_executable(mtproto_detect_transport_test mtproto_detect_transport_test.cpp)
+target_link_libraries(mtproto_detect_transport_test PRIVATE shuzagram_mtproto)
+add_test(NAME mtproto_detect_transport_test COMMAND mtproto_detect_transport_test)
+
 add_executable(mtproto_password_messages_test mtproto_password_messages_test.cpp)
 target_link_libraries(mtproto_password_messages_test PRIVATE shuzagram_mtproto)
 add_test(NAME mtproto_password_messages_test COMMAND mtproto_password_messages_test)
