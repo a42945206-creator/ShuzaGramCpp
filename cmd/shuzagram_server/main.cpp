@@ -35,6 +35,7 @@
 #include "shuzagram/account/update_status.hpp"
 #include "shuzagram/auth/bind_temp_auth_key.hpp"
 #include "shuzagram/auth/check_password.hpp"
+#include "shuzagram/auth/current_user.hpp"
 #include "shuzagram/auth/sign_in.hpp"
 #include "shuzagram/mtproto/crypto/message_cipher.hpp"
 #include "shuzagram/mtproto/messages/auth.hpp"
@@ -413,6 +414,38 @@ std::vector<std::uint8_t> HandleAccountUpdateStatus(shuzagram::store::IAuthoriza
     }
 }
 
+// account.getAuthorizations. An unauthorized/password-pending caller gets an
+// empty list back, matching onAccountGetAuthorizations's own outcome (it
+// doesn't check the authorized bool at all, but queries with user_id 0,
+// which no real authorization row ever has -- same observable result
+// without the pointless store round-trip). See messages/account.hpp's
+// EncodeAuthorization for the branding-field simplification.
+std::vector<std::uint8_t> HandleAccountGetAuthorizations(shuzagram::store::IAuthorizationStore& authorizations,
+                                                          shuzagram::mtproto::TLBuffer& body,
+                                                          const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    try {
+        mtproto::messages::AccountGetAuthorizationsRequest req;
+        req.DecodeBare(body);
+
+        const auto current = auth::ResolveCurrentUser(authorizations, ctx.auth_key_id);
+        std::vector<domain::Authorization> list;
+        if (current.authorized) list = authorizations.ListByUser(current.user_id);
+
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+
+        mtproto::TLBuffer out;
+        mtproto::messages::EncodeAccountAuthorizations(out, list, ctx.auth_key_id, now);
+        return out.buf;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "account.getAuthorizations internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
 // help.getConfig. Deliberately registered unconditionally (not gated
 // behind Postgres being connected, unlike every auth.* handler above): the
 // real protocol allows this even on a connection that never logs in, and
@@ -541,7 +574,11 @@ int main() {
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
                                    return HandleAccountUpdateStatus(*authorization_store, *user_store, body, ctx);
                                });
-        std::printf("users.getUsers/account.updateStatus are wired up\n");
+        rpc_registry.Register(mtproto::messages::AccountGetAuthorizationsRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAccountGetAuthorizations(*authorization_store, body, ctx);
+                               });
+        std::printf("users.getUsers/account.updateStatus/account.getAuthorizations are wired up\n");
     }
 
     mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key),

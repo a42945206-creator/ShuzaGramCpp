@@ -1,7 +1,9 @@
-// Wire-format checks for account.updateStatus (messages/account.hpp) and the
-// new bare-Bool decoder (messages/bool.hpp), same discipline as the other
-// mtproto_*_test.cpp files: exact constructor ids, copied from gotd/td
-// (tg/tl_account_update_status_gen.go), not invented.
+// Wire-format checks for account.updateStatus/account.getAuthorizations
+// (messages/account.hpp) and the new bare-Bool decoder (messages/bool.hpp),
+// same discipline as the other mtproto_*_test.cpp files: exact constructor
+// ids, copied from gotd/td (tg/tl_{account_update_status,
+// account_get_authorizations,account_authorizations,authorization}_gen.go),
+// not invented.
 
 #include <cstdio>
 #include <string>
@@ -20,6 +22,11 @@ void Check(bool ok, const std::string& what) {
         std::fprintf(stderr, "FAIL: %s\n", what.c_str());
         ++g_failures;
     }
+}
+
+std::string DecodeTLString(TLBuffer& b) {
+    const auto v = b.GetBytes();
+    return {v.begin(), v.end()};
 }
 
 void TestDecodeBoolRoundTrip() {
@@ -61,12 +68,102 @@ void TestDecodeAccountUpdateStatusRequest() {
     }
 }
 
+void TestDecodeAccountGetAuthorizationsRequestHasNoFields() {
+    TLBuffer b; // empty -- the real request carries nothing at all
+    AccountGetAuthorizationsRequest req;
+    req.DecodeBare(b);
+    Check(b.buf.empty(), "AccountGetAuthorizationsRequest::DecodeBare consumes nothing");
+}
+
+void TestEncodeAuthorizationCurrentAndOfficialAppFlags() {
+    shuzagram::domain::Authorization a;
+    a.hash = 42;
+    a.device_model = "PC";
+    a.platform = "desktop";
+    a.system_version = "Linux";
+    a.api_id = 6;
+    a.app_version = "1.0";
+    a.ip = "203.0.113.7";
+
+    TLBuffer b;
+    EncodeAuthorization(b, a, /*current=*/true, /*now=*/1000);
+
+    Check(b.PeekID() == 0xad01d61d, "encodes with the real authorization#ad01d61d type id");
+    b.ConsumeID(0xad01d61d);
+    const std::uint32_t flags = b.Uint32();
+    Check((flags & (1u << 0)) != 0, "current flag set when current=true");
+    Check((flags & (1u << 1)) != 0, "official_app flag is always set (matches tgAuthorization)");
+    Check((flags & (1u << 2)) == 0, "password_pending is never set (tgAuthorization never sets it either)");
+
+    Check(b.Long() == 42, "hash encoded");
+    Check(DecodeTLString(b) == "PC", "device_model encoded verbatim (no branding rewrite)");
+    Check(DecodeTLString(b) == "desktop", "platform encoded verbatim");
+    Check(DecodeTLString(b) == "Linux", "system_version encoded verbatim");
+    Check(b.Int32() == 6, "api_id encoded");
+    Check(DecodeTLString(b).empty(), "app_name is empty (no branding-config app-name mapping ported)");
+    Check(DecodeTLString(b) == "1.0", "app_version encoded verbatim");
+    Check(b.Int32() == 1000, "date_created falls back to now when created_at was never set");
+    Check(b.Int32() == 1000, "date_active falls back to date_created when active_at was never set");
+    Check(DecodeTLString(b) == "203.0.113.7", "ip encoded");
+    Check(DecodeTLString(b) == "Unknown", "country is hardcoded Unknown, matching tgAuthorization");
+    Check(DecodeTLString(b) == "Unknown", "region is hardcoded Unknown");
+    Check(b.buf.empty(), "no leftover bytes");
+}
+
+void TestEncodeAuthorizationNotCurrent() {
+    shuzagram::domain::Authorization a;
+    TLBuffer b;
+    EncodeAuthorization(b, a, /*current=*/false, /*now=*/1000);
+    b.ConsumeID(0xad01d61d);
+    const std::uint32_t flags = b.Uint32();
+    Check((flags & (1u << 0)) == 0, "current flag unset when current=false");
+}
+
+void TestEncodeAccountAuthorizations() {
+    shuzagram::domain::Authorization mine;
+    mine.auth_key_id = {1, 2, 3, 4, 5, 6, 7, 8};
+    shuzagram::domain::Authorization other;
+    other.auth_key_id = {9, 9, 9, 9, 9, 9, 9, 9};
+
+    TLBuffer b;
+    EncodeAccountAuthorizations(b, {mine, other}, mine.auth_key_id, 500);
+
+    Check(b.PeekID() == 0x4bff8ea0, "encodes with the real account.authorizations#4bff8ea0 type id");
+    b.ConsumeID(0x4bff8ea0);
+    Check(b.Int32() == 0, "authorization_ttl_days is always 0 (matches the Go source's own stub setter)");
+    Check(b.VectorHeader() == 2, "both authorizations are encoded");
+
+    Check(b.PeekID() == 0xad01d61d, "first entry is a real authorization#ad01d61d");
+    b.ConsumeID(0xad01d61d);
+    Check((b.Uint32() & 1u) != 0, "the entry matching current_auth_key_id has the current flag set");
+    // Skip the rest of the first entry's fields.
+    b.Long();                 // hash
+    DecodeTLString(b);        // device_model
+    DecodeTLString(b);        // platform
+    DecodeTLString(b);        // system_version
+    b.Int32();                // api_id
+    DecodeTLString(b);        // app_name
+    DecodeTLString(b);        // app_version
+    b.Int32();                // date_created
+    b.Int32();                // date_active
+    DecodeTLString(b);        // ip
+    DecodeTLString(b);        // country
+    DecodeTLString(b);        // region
+
+    b.ConsumeID(0xad01d61d);
+    Check((b.Uint32() & 1u) == 0, "the non-matching entry does not have the current flag set");
+}
+
 } // namespace
 
 int main() {
     TestDecodeBoolRoundTrip();
     TestDecodeBoolRejectsUnknownId();
     TestDecodeAccountUpdateStatusRequest();
+    TestDecodeAccountGetAuthorizationsRequestHasNoFields();
+    TestEncodeAuthorizationCurrentAndOfficialAppFlags();
+    TestEncodeAuthorizationNotCurrent();
+    TestEncodeAccountAuthorizations();
     if (g_failures == 0) {
         std::printf("all mtproto account tests passed\n");
         return 0;
