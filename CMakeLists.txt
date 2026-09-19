@@ -84,6 +84,7 @@ target_compile_options(shuzagram_auth PRIVATE -Wall -Wextra)
 add_library(shuzagram_users
   src/users/get_users.cpp
   src/users/update_profile.cpp
+  src/users/username.cpp
 )
 target_include_directories(shuzagram_users PUBLIC include)
 target_link_libraries(shuzagram_users PUBLIC shuzagram_mtproto shuzagram_domain shuzagram_auth)

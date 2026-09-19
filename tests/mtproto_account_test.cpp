@@ -194,6 +194,23 @@ void TestDecodeAccountUpdateProfileRequest() {
     }
 }
 
+void TestDecodeAccountCheckUsernameRequest() {
+    TLBuffer b;
+    b.PutBytes(std::vector<std::uint8_t>{'a', 'l', 'i', 'c', 'e'});
+    AccountCheckUsernameRequest req;
+    req.DecodeBare(b);
+    Check(req.username == "alice", "username decoded");
+    Check(b.buf.empty(), "no leftover bytes");
+}
+
+void TestDecodeAccountUpdateUsernameRequest() {
+    TLBuffer b;
+    b.PutBytes(std::vector<std::uint8_t>{});
+    AccountUpdateUsernameRequest req;
+    req.DecodeBare(b);
+    Check(req.username.empty(), "an empty string decodes correctly (clears the username)");
+}
+
 } // namespace
 
 int main() {
@@ -202,6 +219,8 @@ int main() {
     TestDecodeAccountUpdateStatusRequest();
     TestDecodeAccountGetAuthorizationsRequestHasNoFields();
     TestDecodeAccountUpdateProfileRequest();
+    TestDecodeAccountCheckUsernameRequest();
+    TestDecodeAccountUpdateUsernameRequest();
     TestEncodeAuthorizationCurrentAndOfficialAppFlags();
     TestEncodeAuthorizationNotCurrent();
     TestEncodeAccountAuthorizations();

@@ -56,6 +56,7 @@
 #include "shuzagram/store/postgres/user_store.hpp"
 #include "shuzagram/users/get_users.hpp"
 #include "shuzagram/users/update_profile.hpp"
+#include "shuzagram/users/username.hpp"
 
 namespace {
 
@@ -479,6 +480,61 @@ std::vector<std::uint8_t> HandleAccountUpdateProfile(shuzagram::store::IAuthoriz
     }
 }
 
+// account.checkUsername.
+std::vector<std::uint8_t> HandleAccountCheckUsername(shuzagram::store::IAuthorizationStore& authorizations,
+                                                      shuzagram::store::IUserStore& users,
+                                                      shuzagram::mtproto::TLBuffer& body,
+                                                      const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    try {
+        mtproto::messages::AccountCheckUsernameRequest req;
+        req.DecodeBare(body);
+
+        const auto current = auth::ResolveCurrentUser(authorizations, ctx.auth_key_id);
+        const bool available = shuzagram::users::CheckUsername(users, current.user_id, req.username);
+
+        mtproto::TLBuffer out;
+        mtproto::messages::EncodeBool(out, available);
+        return out.buf;
+    } catch (const domain::UsernameInvalidError&) {
+        return EncodeRpcError(400, "USERNAME_INVALID");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "account.checkUsername internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
+// account.updateUsername.
+std::vector<std::uint8_t> HandleAccountUpdateUsername(shuzagram::store::IAuthorizationStore& authorizations,
+                                                       shuzagram::store::IUserStore& users,
+                                                       shuzagram::mtproto::TLBuffer& body,
+                                                       const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    try {
+        mtproto::messages::AccountUpdateUsernameRequest req;
+        req.DecodeBare(body);
+
+        const auto current = auth::ResolveCurrentUser(authorizations, ctx.auth_key_id);
+        const auto updated = shuzagram::users::UpdateUsername(users, current.user_id, req.username);
+
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+        mtproto::TLBuffer out;
+        mtproto::messages::EncodeUser(out, updated, /*is_self=*/true, now);
+        return out.buf;
+    } catch (const domain::UsernameInvalidError&) {
+        return EncodeRpcError(400, "USERNAME_INVALID");
+    } catch (const domain::UsernameOccupiedError&) {
+        return EncodeRpcError(400, "USERNAME_OCCUPIED");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "account.updateUsername internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
 // help.getConfig. Deliberately registered unconditionally (not gated
 // behind Postgres being connected, unlike every auth.* handler above): the
 // real protocol allows this even on a connection that never logs in, and
@@ -615,8 +671,16 @@ int main() {
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
                                    return HandleAccountUpdateProfile(*authorization_store, *user_store, body, ctx);
                                });
+        rpc_registry.Register(mtproto::messages::AccountCheckUsernameRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAccountCheckUsername(*authorization_store, *user_store, body, ctx);
+                               });
+        rpc_registry.Register(mtproto::messages::AccountUpdateUsernameRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAccountUpdateUsername(*authorization_store, *user_store, body, ctx);
+                               });
         std::printf("users.getUsers/account.updateStatus/account.getAuthorizations/"
-                    "account.updateProfile are wired up\n");
+                    "account.updateProfile/account.checkUsername/account.updateUsername are wired up\n");
     }
 
     mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key),

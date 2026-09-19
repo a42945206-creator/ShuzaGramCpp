@@ -23,11 +23,14 @@
 //   ip:string country:string region:string = Authorization;
 // account.updateProfile#78515775 flags:# first_name:flags.0?string
 //   last_name:flags.1?string about:flags.2?string = User;
+// account.checkUsername#2714d86c username:string = Bool;
+// account.updateUsername#3e0bdd7c username:string = User;
 //
 // Constructor ids copied from gotd/td (github.com/iamxvbaba/td@v1.3.3,
 // tg/tl_{account_update_status,account_get_authorizations,
-// account_authorizations,authorization,account_update_profile}_gen.go),
-// same as every other messages/ header in this project.
+// account_authorizations,authorization,account_update_profile,
+// account_check_username,account_update_username}_gen.go), same as every
+// other messages/ header in this project.
 namespace shuzagram::mtproto::messages {
 
 struct AccountUpdateStatusRequest {
@@ -76,6 +79,28 @@ struct AccountUpdateProfileRequest {
             update.about.assign(v.begin(), v.end());
             update.has_about = true;
         }
+    }
+};
+
+// account.checkUsername#2714d86c username:string = Bool;
+struct AccountCheckUsernameRequest {
+    static constexpr std::uint32_t kTypeId = 0x2714d86c;
+    std::string username;
+
+    void DecodeBare(TLBuffer& b) {
+        const auto v = b.GetBytes();
+        username.assign(v.begin(), v.end());
+    }
+};
+
+// account.updateUsername#3e0bdd7c username:string = User;
+struct AccountUpdateUsernameRequest {
+    static constexpr std::uint32_t kTypeId = 0x3e0bdd7c;
+    std::string username;
+
+    void DecodeBare(TLBuffer& b) {
+        const auto v = b.GetBytes();
+        username.assign(v.begin(), v.end());
     }
 };
 

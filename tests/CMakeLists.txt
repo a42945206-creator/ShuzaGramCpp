@@ -99,3 +99,7 @@ add_test(NAME update_status_test COMMAND update_status_test)
 add_executable(update_profile_test update_profile_test.cpp)
 target_link_libraries(update_profile_test PRIVATE shuzagram_users)
 add_test(NAME update_profile_test COMMAND update_profile_test)
+
+add_executable(username_test username_test.cpp)
+target_link_libraries(username_test PRIVATE shuzagram_users)
+add_test(NAME username_test COMMAND username_test)
