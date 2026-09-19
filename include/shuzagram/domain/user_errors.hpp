@@ -91,4 +91,9 @@ public:
     FirstNameInvalidError() : Error("first name invalid") {}
 };
 
+class AboutTooLongError : public Error {
+public:
+    AboutTooLongError() : Error("about too long") {}
+};
+
 } // namespace shuzagram::domain

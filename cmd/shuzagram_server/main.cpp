@@ -55,6 +55,7 @@
 #include "shuzagram/store/postgres/temp_auth_key_store.hpp"
 #include "shuzagram/store/postgres/user_store.hpp"
 #include "shuzagram/users/get_users.hpp"
+#include "shuzagram/users/update_profile.hpp"
 
 namespace {
 
@@ -446,6 +447,38 @@ std::vector<std::uint8_t> HandleAccountGetAuthorizations(shuzagram::store::IAuth
     }
 }
 
+// account.updateProfile. Response is a plain user# (self=true, since it's
+// always the caller's own account) -- reuses EncodeUser from
+// messages/users.hpp rather than duplicating the projection.
+std::vector<std::uint8_t> HandleAccountUpdateProfile(shuzagram::store::IAuthorizationStore& authorizations,
+                                                      shuzagram::store::IUserStore& users,
+                                                      shuzagram::mtproto::TLBuffer& body,
+                                                      const shuzagram::mtproto::RpcContext& ctx) {
+    using namespace shuzagram;
+
+    try {
+        mtproto::messages::AccountUpdateProfileRequest req;
+        req.DecodeBare(body);
+
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+        const auto current = auth::ResolveCurrentUser(authorizations, ctx.auth_key_id);
+        const auto updated = shuzagram::users::UpdateProfile(users, current.user_id, req.update, now);
+
+        mtproto::TLBuffer out;
+        mtproto::messages::EncodeUser(out, updated, /*is_self=*/true, now);
+        return out.buf;
+    } catch (const domain::FirstNameInvalidError&) {
+        return EncodeRpcError(400, "FIRSTNAME_INVALID");
+    } catch (const domain::AboutTooLongError&) {
+        return EncodeRpcError(400, "ABOUT_TOO_LONG");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "account.updateProfile internal error: %s\n", e.what());
+        return EncodeRpcError(500, "INTERNAL");
+    }
+}
+
 // help.getConfig. Deliberately registered unconditionally (not gated
 // behind Postgres being connected, unlike every auth.* handler above): the
 // real protocol allows this even on a connection that never logs in, and
@@ -578,7 +611,12 @@ int main() {
                                [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
                                    return HandleAccountGetAuthorizations(*authorization_store, body, ctx);
                                });
-        std::printf("users.getUsers/account.updateStatus/account.getAuthorizations are wired up\n");
+        rpc_registry.Register(mtproto::messages::AccountUpdateProfileRequest::kTypeId,
+                               [&](std::uint32_t, mtproto::TLBuffer& body, const mtproto::RpcContext& ctx) {
+                                   return HandleAccountUpdateProfile(*authorization_store, *user_store, body, ctx);
+                               });
+        std::printf("users.getUsers/account.updateStatus/account.getAuthorizations/"
+                    "account.updateProfile are wired up\n");
     }
 
     mtproto::TcpHandshakeServer server(bind_address, static_cast<std::uint16_t>(port), std::move(key),

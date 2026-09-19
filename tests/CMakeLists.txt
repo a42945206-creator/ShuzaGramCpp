@@ -95,3 +95,7 @@ add_test(NAME mtproto_account_test COMMAND mtproto_account_test)
 add_executable(update_status_test update_status_test.cpp)
 target_link_libraries(update_status_test PRIVATE shuzagram_account)
 add_test(NAME update_status_test COMMAND update_status_test)
+
+add_executable(update_profile_test update_profile_test.cpp)
+target_link_libraries(update_profile_test PRIVATE shuzagram_users)
+add_test(NAME update_profile_test COMMAND update_profile_test)

@@ -154,6 +154,46 @@ void TestEncodeAccountAuthorizations() {
     Check((b.Uint32() & 1u) == 0, "the non-matching entry does not have the current flag set");
 }
 
+void TestDecodeAccountUpdateProfileRequest() {
+    {
+        // No flags set -- every field left unset (client is only updating,
+        // say, an emoji status via a different call and sent this bare).
+        TLBuffer b;
+        b.PutUint32(0);
+        AccountUpdateProfileRequest req;
+        req.DecodeBare(b);
+        Check(!req.update.has_first_name, "no flags -> has_first_name is false");
+        Check(!req.update.has_last_name, "no flags -> has_last_name is false");
+        Check(!req.update.has_about, "no flags -> has_about is false");
+        Check(b.buf.empty(), "no leftover bytes");
+    }
+    {
+        // Only about set (bit 2) -- first/last name must stay unset.
+        TLBuffer b;
+        b.PutUint32(1u << 2);
+        b.PutBytes(std::vector<std::uint8_t>{'h', 'i'});
+        AccountUpdateProfileRequest req;
+        req.DecodeBare(b);
+        Check(!req.update.has_first_name, "bit 2 only -> has_first_name stays false");
+        Check(!req.update.has_last_name, "bit 2 only -> has_last_name stays false");
+        Check(req.update.has_about && req.update.about == "hi", "bit 2 decodes about");
+    }
+    {
+        // All three set, in wire order (first_name, last_name, about).
+        TLBuffer b;
+        b.PutUint32((1u << 0) | (1u << 1) | (1u << 2));
+        b.PutBytes(std::vector<std::uint8_t>{'A'});
+        b.PutBytes(std::vector<std::uint8_t>{'B'});
+        b.PutBytes(std::vector<std::uint8_t>{'C'});
+        AccountUpdateProfileRequest req;
+        req.DecodeBare(b);
+        Check(req.update.has_first_name && req.update.first_name == "A", "first_name decoded first");
+        Check(req.update.has_last_name && req.update.last_name == "B", "last_name decoded second");
+        Check(req.update.has_about && req.update.about == "C", "about decoded third");
+        Check(b.buf.empty(), "no leftover bytes");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -161,6 +201,7 @@ int main() {
     TestDecodeBoolRejectsUnknownId();
     TestDecodeAccountUpdateStatusRequest();
     TestDecodeAccountGetAuthorizationsRequestHasNoFields();
+    TestDecodeAccountUpdateProfileRequest();
     TestEncodeAuthorizationCurrentAndOfficialAppFlags();
     TestEncodeAuthorizationNotCurrent();
     TestEncodeAccountAuthorizations();

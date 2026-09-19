@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "shuzagram/domain/authorization.hpp"
+#include "shuzagram/domain/user.hpp"
 #include "shuzagram/mtproto/messages/bool.hpp"
 #include "shuzagram/mtproto/tl_buffer.hpp"
 
@@ -20,11 +21,13 @@
 //   device_model:string platform:string system_version:string api_id:int
 //   app_name:string app_version:string date_created:int date_active:int
 //   ip:string country:string region:string = Authorization;
+// account.updateProfile#78515775 flags:# first_name:flags.0?string
+//   last_name:flags.1?string about:flags.2?string = User;
 //
 // Constructor ids copied from gotd/td (github.com/iamxvbaba/td@v1.3.3,
 // tg/tl_{account_update_status,account_get_authorizations,
-// account_authorizations,authorization}_gen.go), same as every other
-// messages/ header in this project.
+// account_authorizations,authorization,account_update_profile}_gen.go),
+// same as every other messages/ header in this project.
 namespace shuzagram::mtproto::messages {
 
 struct AccountUpdateStatusRequest {
@@ -38,6 +41,42 @@ struct AccountUpdateStatusRequest {
 struct AccountGetAuthorizationsRequest {
     static constexpr std::uint32_t kTypeId = 0xe320c158;
     void DecodeBare(TLBuffer&) const {}
+};
+
+// account.updateProfile#78515775 flags:# first_name:flags.0?string
+//   last_name:flags.1?string about:flags.2?string = User;
+//
+// Each field is independently optional -- absence means "leave unchanged",
+// not "clear it". The partial-update MERGE itself happens in
+// users::UpdateProfile (include/shuzagram/users/update_profile.hpp), not
+// here; this struct only carries what the wire actually said.
+struct AccountUpdateProfileRequest {
+    static constexpr std::uint32_t kTypeId = 0x78515775;
+    domain::UserProfileUpdate update;
+
+    void DecodeBare(TLBuffer& b) {
+        constexpr std::uint32_t kFlagFirstName = 1u << 0;
+        constexpr std::uint32_t kFlagLastName = 1u << 1;
+        constexpr std::uint32_t kFlagAbout = 1u << 2;
+
+        const std::uint32_t flags = b.Uint32();
+        update = domain::UserProfileUpdate{};
+        if (flags & kFlagFirstName) {
+            const auto v = b.GetBytes();
+            update.first_name.assign(v.begin(), v.end());
+            update.has_first_name = true;
+        }
+        if (flags & kFlagLastName) {
+            const auto v = b.GetBytes();
+            update.last_name.assign(v.begin(), v.end());
+            update.has_last_name = true;
+        }
+        if (flags & kFlagAbout) {
+            const auto v = b.GetBytes();
+            update.about.assign(v.begin(), v.end());
+            update.has_about = true;
+        }
+    }
 };
 
 // authorization#ad01d61d. Mirrors the real Go projection (tgAuthorization,
